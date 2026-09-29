@@ -175,7 +175,8 @@ local function grabCrystal(crystal)
 end
 
 -- Grab while hovering in place: no ground needed, the character is CFrame-locked
--- in mid-air for the duration of the attempt (falls normally afterwards)
+-- in mid-air for the duration of the attempt (falls normally afterwards).
+-- While locked it is also noclipped and ragdoll-proof: nothing can hit or push it
 local function hoverGrab(crystal)
 	local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
 	if not root then
@@ -183,12 +184,33 @@ local function hoverGrab(crystal)
 		return
 	end
 
+	local character = LocalPlayer.Character
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+
+	-- NoClip during the hover: remember collidable parts, switch them off
+	local solid = {}
+	for _, part in ipairs(character:GetDescendants()) do
+		if part:IsA("BasePart") and part.CanCollide then
+			solid[#solid + 1] = part
+			part.CanCollide = false
+		end
+	end
+
+	-- Knockback cannot ragdoll or tip over a locked character
+	if humanoid then
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+	end
+
 	local hoverCFrame = root.CFrame
 	local holding = true
 	local conn = RunService.Heartbeat:Connect(function()
 		if not holding then return end
 		local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-		if r then r.CFrame = hoverCFrame end
+		if r then
+			r.CFrame = hoverCFrame
+			r.AssemblyLinearVelocity = Vector3.zero
+		end
 	end)
 
 	task.wait(0.25)
@@ -207,6 +229,15 @@ local function hoverGrab(crystal)
 
 	holding = false
 	conn:Disconnect()
+
+	-- Back to normal physics
+	for _, part in ipairs(solid) do
+		if part.Parent then part.CanCollide = true end
+	end
+	if humanoid and humanoid.Parent then
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
+	end
 end
 
 -- Teleport from the search list also mines the crystal
