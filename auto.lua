@@ -12,7 +12,7 @@ local GoHome = Remotes and Remotes:FindFirstChild("GoHome")
 local ToggleFavorite = Remotes and Remotes:FindFirstChild("ToggleFavorite")
 
 -- Server hop: paste the raw URL of this script (e.g. your gist raw link) to auto-resume after hopping
-local SCRIPT_URL = ""
+local SCRIPT_URL = "https://raw.githubusercontent.com/erfinbadrian/roblox/refs/heads/main/auto.lua"
 
 -- Anti-AFK so the farm survives the 20-min idle kick
 local VirtualUser = game:GetService("VirtualUser")
@@ -452,6 +452,22 @@ local function backpackWeight()
 	return total
 end
 
+-- Weight of crystals that would actually sell (favorites are kept)
+local function sellableWeight()
+	local total = 0
+	local function scan(container)
+		if not container then return end
+		for _, child in ipairs(container:GetChildren()) do
+			if child:IsA("Tool") and child:GetAttribute("Tier") ~= nil and child:GetAttribute("Favorited") ~= true then
+				total += tonumber(child:GetAttribute("WeightKg")) or 0
+			end
+		end
+	end
+	scan(LocalPlayer:FindFirstChildOfClass("Backpack"))
+	scan(LocalPlayer.Character)
+	return total
+end
+
 local function ownsGamepass(name)
 	local folder = LocalPlayer:FindFirstChild("GamepassesOwned")
 	local flag = folder and folder:FindFirstChild(name)
@@ -502,6 +518,8 @@ local function sellAll()
 		return
 	end
 
+	local sellableBefore = sellableWeight()
+
 	local function unfavorite(container)
 		if not container then return end
 		for _, child in ipairs(container:GetChildren()) do
@@ -520,6 +538,9 @@ local function sellAll()
 	task.wait(0.6)
 	pcall(function() SellRequest:FireServer("all") end)
 	task.wait(3)
+
+	local soldKg = math.max(0, sellableBefore - sellableWeight())
+	setStatus(string.format("Sold %.1f kg (favorites kept)", soldKg), Color3.fromRGB(120, 220, 150))
 end
 
 local function findBest(minPrice)
@@ -606,6 +627,10 @@ local function hopServer()
 			'getgenv().CRYSTAL_CFG={min=%q,fav=%q,autostart=%s};loadstring(game:HttpGet("%s"))()',
 			inputBox.Text, favInput.Text, tostring(farming), SCRIPT_URL
 		))
+	else
+		local reason = SCRIPT_URL == "" and "SCRIPT_URL is empty" or "executor has no queue_on_teleport"
+		setStatus("Hopping WITHOUT auto-resume: " .. reason, Color3.fromRGB(255, 200, 60))
+		print("[Crystal Farm] auto-resume unavailable: " .. reason)
 	end
 
 	pcall(function()
@@ -642,11 +667,15 @@ local function farmLoop()
 			setStatus("Waiting for crystals >= " .. formatPrice(minPrice) .. "...")
 			task.wait(1)
 		else
-			lastFoundAt = os.clock()
-			-- Bag full for this crystal: sell first
+			-- Bag full for this crystal: sell first, but only if something can actually sell
 			local weight = tonumber(best:GetAttribute("WeightKg")) or 0
 			if weight > backpackFree() then
-				sellAll()
+				if sellableWeight() > 0 then
+					sellAll()
+				else
+					setStatus("Bag full of favorites, nothing to sell. Waiting (hop timer running)...", Color3.fromRGB(255, 200, 60))
+					task.wait(2)
+				end
 			else
 				setStatus("Mining: " .. best.Name .. " (" .. formatPrice(price) .. ")")
 				teleportTo(best)
@@ -662,10 +691,13 @@ local function farmLoop()
 				local collected = not best.Parent or best:GetAttribute("Collected") == true
 				if collected then
 					fails = 0
+					-- Only a successful collection resets the idle/hop timer
+					lastFoundAt = os.clock()
 				else
-					-- Repeated failures usually mean the bag is actually full (capacity estimate off): sell and retry
+					-- Collection failed: could be bag full (estimate off) or an unmineable crystal
 					fails += 1
-					if fails >= 3 then
+					setStatus("Collect failed x" .. fails .. ": " .. best.Name, Color3.fromRGB(255, 150, 90))
+					if fails >= 3 and sellableWeight() > 0 then
 						sellAll()
 						fails = 0
 					end
