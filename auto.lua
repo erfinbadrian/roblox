@@ -15,6 +15,13 @@ local ToggleFavorite = Remotes and Remotes:FindFirstChild("ToggleFavorite")
 -- Server hop: paste the raw URL of this script (e.g. your gist raw link) to auto-resume after hopping
 local SCRIPT_URL = "https://raw.githubusercontent.com/erfinbadrian/roblox/refs/heads/main/auto.lua"
 
+-- Skip if this script fully loaded seconds ago (auto-exec loader + queue_on_teleport
+-- can both fire on the same join; the second run would duplicate the farm loop)
+if shared.CRYSTAL_LOADED_AT and os.time() - shared.CRYSTAL_LOADED_AT < 5 then
+	return
+end
+shared.CRYSTAL_LOADED_AT = os.time()
+
 -- Anti-AFK so the farm survives the 20-min idle kick
 local VirtualUser = game:GetService("VirtualUser")
 LocalPlayer.Idled:Connect(function()
@@ -760,16 +767,27 @@ local function hopServer()
 		return
 	end
 
-	-- Auto-resume in the next server: settings + farm state baked into the queued script
+	-- Auto-resume path 1: file config. The auto-exec loader re-runs this script on
+	-- every join and restores it, no queue_on_teleport needed (Macsploit lacks it)
+	if farming and type(writefile) == "function" then
+		pcall(function()
+			writefile("crystal_farm_cfg.json", HttpService:JSONEncode({
+				min = inputBox.Text,
+				fav = favInput.Text,
+				autostart = true,
+				savedAt = os.time(),
+			}))
+		end)
+	end
+
+	-- Auto-resume path 2: queued script for executors that support it
 	if SCRIPT_URL ~= "" and type(queue_on_teleport) == "function" then
 		queue_on_teleport(string.format(
-			'getgenv().CRYSTAL_CFG={min=%q,fav=%q,autostart=%s};loadstring(game:HttpGet("%s"))()',
+			'shared.CRYSTAL_CFG={min=%q,fav=%q,autostart=%s};loadstring(game:HttpGet("%s"))()',
 			inputBox.Text, favInput.Text, tostring(farming), SCRIPT_URL
 		))
 	else
-		local reason = SCRIPT_URL == "" and "SCRIPT_URL is empty" or "executor has no queue_on_teleport"
-		setStatus("Hopping WITHOUT auto-resume: " .. reason, Color3.fromRGB(255, 200, 60))
-		print("[Crystal Farm] auto-resume unavailable: " .. reason)
+		print("[Crystal Farm] queue_on_teleport unavailable, relying on auto-exec loader + cfg file")
 	end
 
 	pcall(function()
@@ -876,8 +894,19 @@ farmBtn.MouseButton1Click:Connect(function()
 	end
 end)
 
--- Restore settings after a server hop (baked in by queue_on_teleport)
-local cfg = (getgenv and getgenv().CRYSTAL_CFG) or nil
+-- Restore settings after a server hop: queued script config first,
+-- else the cfg file written while hopping (auto-exec loader path)
+local cfg = (shared.CRYSTAL_CFG) or (getgenv and getgenv().CRYSTAL_CFG) or nil
+if not cfg and type(readfile) == "function" then
+	local ok, raw = pcall(readfile, "crystal_farm_cfg.json")
+	if ok and type(raw) == "string" and raw ~= "" then
+		local okJson, data = pcall(HttpService.JSONDecode, HttpService, raw)
+		-- Ignore stale configs: a hop config older than 10 min should not auto-start
+		if okJson and type(data) == "table" and os.time() - (data.savedAt or 0) < 600 then
+			cfg = data
+		end
+	end
+end
 if cfg then
 	if cfg.min then inputBox.Text = cfg.min end
 	if cfg.fav then favInput.Text = cfg.fav end
