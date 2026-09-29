@@ -211,15 +211,23 @@ local function teleportTo(object)
 		Vector3.new(0, 12, 0), Vector3.new(0, 20, 0),
 	}
 
-	for _, offset in ipairs(offsets) do
-		character:PivotTo(targetCFrame + offset)
-		-- Anchor the hover lock to the arrival spot: no falling while verifying/grabbing
-		floatTarget = targetCFrame + offset
-		task.wait(0.1)
+	-- Skip spots inside walls: spawning in geometry makes physics fling the character
+	local clearParams = OverlapParams.new()
+	clearParams.FilterType = Enum.RaycastFilterType.Exclude
+	clearParams.FilterDescendantsInstances = { character, object }
 
-		local root = character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart
-		if root and (root.Position - (targetCFrame.Position + offset)).Magnitude < 12 then
-			return true
+	for _, offset in ipairs(offsets) do
+		local goal = targetCFrame.Position + offset
+		if #workspace:GetPartBoundsInRadius(goal, 2.5, clearParams) == 0 then
+			-- Lock before the pivot so the hover shield is already holding the spot
+			floatTarget = targetCFrame + offset
+			character:PivotTo(floatTarget)
+			task.wait(0.1)
+
+			local root = character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart
+			if root and (root.Position - goal).Magnitude < 12 then
+				return true
+			end
 		end
 	end
 
@@ -293,11 +301,13 @@ end
 
 -- Teleport from the search list also mines the crystal (hovers only for the grab)
 local function tpAndMine(crystal)
+	-- Shield on BEFORE the teleport: without it the character lands in a wall
+	-- with collisions on for a frame and gets thrown by physics
+	startFloat()
 	if teleportTo(crystal) then
-		startFloat()
 		hoverGrab(crystal)
-		stopFloat()
 	end
+	stopFloat()
 end
 
 --------------------------------------------------------------------------------
@@ -774,6 +784,7 @@ local function hopServer()
 			writefile("crystal_farm_cfg.json", HttpService:JSONEncode({
 				min = inputBox.Text,
 				fav = favInput.Text,
+				idle = hopIdleInput.Text,
 				autostart = true,
 				savedAt = os.time(),
 			}))
@@ -783,8 +794,8 @@ local function hopServer()
 	-- Auto-resume path 2: queued script for executors that support it
 	if SCRIPT_URL ~= "" and type(queue_on_teleport) == "function" then
 		queue_on_teleport(string.format(
-			'shared.CRYSTAL_CFG={min=%q,fav=%q,autostart=%s};loadstring(game:HttpGet("%s"))()',
-			inputBox.Text, favInput.Text, tostring(farming), SCRIPT_URL
+			'shared.CRYSTAL_CFG={min=%q,fav=%q,idle=%q,autostart=%s};loadstring(game:HttpGet("%s"))()',
+			inputBox.Text, favInput.Text, hopIdleInput.Text, tostring(farming), SCRIPT_URL
 		))
 	else
 		print("[Crystal Farm] queue_on_teleport unavailable, relying on auto-exec loader + cfg file")
@@ -910,5 +921,6 @@ end
 if cfg then
 	if cfg.min then inputBox.Text = cfg.min end
 	if cfg.fav then favInput.Text = cfg.fav end
+	if cfg.idle then hopIdleInput.Text = cfg.idle end
 	if cfg.autostart then startFarm() end
 end
