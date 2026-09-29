@@ -91,6 +91,83 @@ local function crystalAttr(crystal, name)
 	return crystalPart(crystal):GetAttribute(name)
 end
 
+-- Persistent hover: while floatTarget is set, the character is CFrame-locked
+-- mid-air and noclipped, so it never falls between mines and nothing can hit it.
+-- Clearing floatTarget (selling, stopping) releases the lock and restores collisions.
+local floatTarget = nil
+local floatConn = nil
+local floatAppliedHumanoid = nil
+local floatSolid = setmetatable({}, { __mode = "k" })
+
+local function floatHeartbeat()
+	local character = LocalPlayer.Character
+	if not character then return end
+
+	if floatTarget then
+		local r = character:FindFirstChild("HumanoidRootPart")
+		if r then
+			r.CFrame = floatTarget
+			r.AssemblyLinearVelocity = Vector3.zero
+		end
+
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if humanoid and humanoid ~= floatAppliedHumanoid then
+			floatAppliedHumanoid = humanoid
+			humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+			humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+		end
+
+		for _, part in ipairs(character:GetDescendants()) do
+			if part:IsA("BasePart") and part.CanCollide then
+				floatSolid[part] = true
+				part.CanCollide = false
+			end
+		end
+	else
+		-- Unlocked: give collisions back so the character can walk/land normally
+		for part in pairs(floatSolid) do
+			if part.Parent then part.CanCollide = true end
+		end
+		table.clear(floatSolid)
+	end
+end
+
+local function startFloat()
+	if floatConn then return end
+	-- Drop a leftover lock from a previous execution of this script
+	if getgenv and getgenv().CRYSTAL_FLOAT_CONN then
+		pcall(function() getgenv().CRYSTAL_FLOAT_CONN:Disconnect() end)
+		getgenv().CRYSTAL_FLOAT_CONN = nil
+	end
+	floatConn = RunService.Heartbeat:Connect(floatHeartbeat)
+	if getgenv then
+		getgenv().CRYSTAL_FLOAT_CONN = floatConn
+	end
+end
+
+local function stopFloat()
+	if floatConn then
+		floatConn:Disconnect()
+		floatConn = nil
+	end
+	if getgenv and getgenv().CRYSTAL_FLOAT_CONN == floatConn then
+		getgenv().CRYSTAL_FLOAT_CONN = nil
+	end
+	floatTarget = nil
+
+	for part in pairs(floatSolid) do
+		if part.Parent then part.CanCollide = true end
+	end
+	table.clear(floatSolid)
+
+	local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+	if humanoid and humanoid == floatAppliedHumanoid then
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
+		humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
+	end
+	floatAppliedHumanoid = nil
+end
+
 -- Teleport with fallback offsets: crystals embedded in terrain need a clear spot,
 -- and we verify the avatar actually arrived (server/physics can snap it back)
 local function teleportTo(object)
@@ -117,6 +194,8 @@ local function teleportTo(object)
 
 	for _, offset in ipairs(offsets) do
 		character:PivotTo(targetCFrame + offset)
+		-- Anchor the hover lock to the arrival spot: no falling while verifying/grabbing
+		floatTarget = targetCFrame + offset
 		task.wait(0.1)
 
 		local root = character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart
@@ -125,6 +204,7 @@ local function teleportTo(object)
 		end
 	end
 
+	floatTarget = nil
 	return false
 end
 
@@ -174,45 +254,9 @@ local function grabCrystal(crystal)
 	return sent
 end
 
--- Grab while hovering in place: no ground needed, the character is CFrame-locked
--- in mid-air for the duration of the attempt (falls normally afterwards).
--- While locked it is also noclipped and ragdoll-proof: nothing can hit or push it
+-- Grab while the hover lock holds the character in mid-air over the crystal:
+-- no ground needed, nothing can hit it, and it never falls while the farm runs
 local function hoverGrab(crystal)
-	local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-	if not root then
-		grabCrystal(crystal)
-		return
-	end
-
-	local character = LocalPlayer.Character
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-
-	-- NoClip during the hover: remember collidable parts, switch them off
-	local solid = {}
-	for _, part in ipairs(character:GetDescendants()) do
-		if part:IsA("BasePart") and part.CanCollide then
-			solid[#solid + 1] = part
-			part.CanCollide = false
-		end
-	end
-
-	-- Knockback cannot ragdoll or tip over a locked character
-	if humanoid then
-		humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
-		humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
-	end
-
-	local hoverCFrame = root.CFrame
-	local holding = true
-	local conn = RunService.Heartbeat:Connect(function()
-		if not holding then return end
-		local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-		if r then
-			r.CFrame = hoverCFrame
-			r.AssemblyLinearVelocity = Vector3.zero
-		end
-	end)
-
 	task.wait(0.25)
 	grabCrystal(crystal)
 
@@ -226,24 +270,14 @@ local function hoverGrab(crystal)
 	while os.clock() < deadline and crystal.Parent and crystalAttr(crystal, "Collected") ~= true do
 		task.wait(0.1)
 	end
-
-	holding = false
-	conn:Disconnect()
-
-	-- Back to normal physics
-	for _, part in ipairs(solid) do
-		if part.Parent then part.CanCollide = true end
-	end
-	if humanoid and humanoid.Parent then
-		humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
-		humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
-	end
 end
 
--- Teleport from the search list also mines the crystal
+-- Teleport from the search list also mines the crystal (hovers only for the grab)
 local function tpAndMine(crystal)
 	if teleportTo(crystal) then
+		startFloat()
 		hoverGrab(crystal)
+		stopFloat()
 	end
 end
 
@@ -611,6 +645,10 @@ end
 
 -- Sell everything except favorited crystals
 local function sellAll()
+	-- Release the hover: the server teleports the character to the seller,
+	-- and a mid-air lock plus noclip would break that trip
+	floatTarget = nil
+	task.wait(0.1)
 	setStatus("Selling...", Color3.fromRGB(255, 200, 60))
 
 	if not GoHome or not SellRequest then
@@ -812,6 +850,7 @@ end
 local function startFarm()
 	if farming then return end
 	farming = true
+	startFloat()
 	farmBtn.Text = "■ Stop Auto Farm"
 	farmBtn.BackgroundColor3 = Color3.fromRGB(220, 80, 80)
 	task.spawn(farmLoop)
@@ -819,6 +858,7 @@ end
 
 local function stopFarm()
 	farming = false
+	stopFloat()
 	farmBtn.Text = "▶ Start Auto Farm"
 	farmBtn.BackgroundColor3 = Color3.fromRGB(46, 175, 110)
 end
