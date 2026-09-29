@@ -659,20 +659,8 @@ local function sellAll()
 
 	local sellableBefore = sellableWeight()
 
-	local function unfavorite(container)
-		if not container then return end
-		for _, child in ipairs(container:GetChildren()) do
-			if child:IsA("Tool") and child:GetAttribute("Favorited") == true then
-				child:SetAttribute("Favorited", false)
-				if ToggleFavorite then
-					pcall(function() ToggleFavorite:FireServer(child, false) end)
-				end
-			end
-		end
-	end
-	unfavorite(LocalPlayer:FindFirstChildOfClass("Backpack"))
-	unfavorite(LocalPlayer.Character)
-
+	-- No unfavorite here: the game's SellRequest("all") skips favorited items,
+	-- which is exactly what keeps the high-value favorites in the bag
 	pcall(function() GoHome:FireServer("sell") end)
 	task.wait(0.6)
 	pcall(function() SellRequest:FireServer("all") end)
