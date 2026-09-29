@@ -1,5 +1,6 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 local CrystalsFolder = workspace:WaitForChild("Things"):WaitForChild("Crystals")
@@ -173,18 +174,45 @@ local function grabCrystal(crystal)
 	return sent
 end
 
--- Teleport from the search list also mines the crystal
-local function tpAndMine(crystal)
-	teleportTo(crystal)
+-- Grab while hovering in place: no ground needed, the character is CFrame-locked
+-- in mid-air for the duration of the attempt (falls normally afterwards)
+local function hoverGrab(crystal)
+	local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+	if not root then
+		grabCrystal(crystal)
+		return
+	end
+
+	local hoverCFrame = root.CFrame
+	local holding = true
+	local conn = RunService.Heartbeat:Connect(function()
+		if not holding then return end
+		local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+		if r then r.CFrame = hoverCFrame end
+	end)
+
 	task.wait(0.25)
 	grabCrystal(crystal)
 
-	-- Retry until collected (max ~2s)
-	local deadline = os.clock() + 2
-	while os.clock() < deadline do
-		if not crystal.Parent or crystal:GetAttribute("Collected") == true then return end
-		task.wait(0.3)
+	-- One retry if the first fire did not take
+	task.wait(0.5)
+	if crystal.Parent and crystalAttr(crystal, "Collected") ~= true then
 		grabCrystal(crystal)
+	end
+
+	local deadline = os.clock() + 1.2
+	while os.clock() < deadline and crystal.Parent and crystalAttr(crystal, "Collected") ~= true do
+		task.wait(0.1)
+	end
+
+	holding = false
+	conn:Disconnect()
+end
+
+-- Teleport from the search list also mines the crystal
+local function tpAndMine(crystal)
+	if teleportTo(crystal) then
+		hoverGrab(crystal)
 	end
 end
 
@@ -722,14 +750,8 @@ local function farmLoop()
 				setStatus("Mining: " .. best.Name .. " (" .. formatPrice(price) .. ")")
 
 				if teleportTo(best) then
-					task.wait(0.25)
-					grabCrystal(best)
-
-					-- Wait until collected (or 2s timeout, then move on)
-					local deadline = os.clock() + 2
-					while os.clock() < deadline and best.Parent and crystalAttr(best, "Collected") ~= true do
-						task.wait(0.1)
-					end
+					-- Hover in mid-air over the crystal: works with no ground below
+					hoverGrab(best)
 
 					local collected = not best.Parent or crystalAttr(best, "Collected") == true
 					if collected then
