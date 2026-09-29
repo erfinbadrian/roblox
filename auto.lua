@@ -66,6 +66,30 @@ local function formatPrice(number)
 	return "$" .. formatted
 end
 
+-- Resolve the crystal BasePart the game's remotes expect (Value/WeightKg/Collected live on it)
+local function crystalPart(crystal)
+	if crystal:IsA("BasePart") then return crystal end
+
+	local prompt = crystal:FindFirstChildWhichIsA("ProximityPrompt", true)
+	local holder = prompt and prompt.Parent
+	if holder and holder:IsA("BasePart") then return holder end
+
+	for _, d in ipairs(crystal:GetDescendants()) do
+		if d:IsA("BasePart") and d:GetAttribute("Value") ~= nil then return d end
+	end
+	for _, d in ipairs(crystal:GetDescendants()) do
+		if d:IsA("BasePart") then return d end
+	end
+	return crystal
+end
+
+-- Read a crystal attribute whether it lives on the model or the part
+local function crystalAttr(crystal, name)
+	local v = crystal:GetAttribute(name)
+	if v ~= nil then return v end
+	return crystalPart(crystal):GetAttribute(name)
+end
+
 -- Teleport with fallback offsets: crystals embedded in terrain need a clear spot,
 -- and we verify the avatar actually arrived (server/physics can snap it back)
 local function teleportTo(object)
@@ -80,10 +104,14 @@ local function teleportTo(object)
 	end
 	if not targetCFrame then return false end
 
+	-- Close offsets first: the server enforces its own prompt distance, so a 20-stud-high
+	-- arrival point can pass our check but be out of the game's collect range
 	local offsets = {
-		Vector3.new(0, 3, 0), Vector3.new(0, 7, 0), Vector3.new(0, 12, 0), Vector3.new(0, 20, 0),
+		Vector3.new(0, 3, 0),
 		Vector3.new(5, 3, 0), Vector3.new(-5, 3, 0), Vector3.new(0, 3, 5), Vector3.new(0, 3, -5),
+		Vector3.new(0, 7, 0),
 		Vector3.new(9, 6, 0), Vector3.new(-9, 6, 0), Vector3.new(0, 6, 9), Vector3.new(0, 6, -9),
+		Vector3.new(0, 12, 0), Vector3.new(0, 20, 0),
 	}
 
 	for _, offset in ipairs(offsets) do
@@ -104,7 +132,7 @@ local function grabCrystal(crystal)
 	local sent = false
 	if HoldComplete then
 		sent = pcall(function()
-			HoldComplete:FireServer(crystal)
+			HoldComplete:FireServer(crystalPart(crystal))
 		end)
 	end
 
@@ -560,7 +588,7 @@ end
 local function findBest(minPrice)
 	local best, bestPrice = nil, 0
 	for _, crystal in ipairs(CrystalsFolder:GetChildren()) do
-		if crystal.Parent and crystal:GetAttribute("Collected") ~= true then
+		if crystal.Parent and crystalAttr(crystal, "Collected") ~= true then
 			local prompt = crystal:FindFirstChildWhichIsA("ProximityPrompt", true)
 			if prompt then
 				local price = extractPriceFromPromptText(prompt.ObjectText .. " " .. prompt.ActionText)
@@ -682,7 +710,7 @@ local function farmLoop()
 			task.wait(1)
 		else
 			-- Bag full for this crystal: sell first, but only if something can actually sell
-			local weight = tonumber(best:GetAttribute("WeightKg")) or 0
+			local weight = tonumber(crystalAttr(best, "WeightKg")) or 0
 			if weight > backpackFree() then
 				if sellableWeight() > 0 then
 					sellAll()
@@ -699,11 +727,11 @@ local function farmLoop()
 
 					-- Wait until collected (or 2s timeout, then move on)
 					local deadline = os.clock() + 2
-					while os.clock() < deadline and best.Parent and best:GetAttribute("Collected") ~= true do
+					while os.clock() < deadline and best.Parent and crystalAttr(best, "Collected") ~= true do
 						task.wait(0.1)
 					end
 
-					local collected = not best.Parent or best:GetAttribute("Collected") == true
+					local collected = not best.Parent or crystalAttr(best, "Collected") == true
 					if collected then
 						fails = 0
 						-- Only a successful collection resets the idle/hop timer
