@@ -64,6 +64,12 @@ local function extractPriceFromPromptText(text)
 	return 0, ""
 end
 
+-- Trace prints so teleport/grab failures are visible in the executor console
+local DEBUG = true
+local function dlog(msg)
+	if DEBUG then print("[CrystalFarm] " .. msg) end
+end
+
 local function formatPrice(number)
 	local formatted = tostring(math.floor(number))
 	while true do  
@@ -293,7 +299,7 @@ local function teleportTo(object)
 	clearParams.FilterDescendantsInstances = { character, object }
 	clearParams.RespectCanCollide = true
 
-	for _, offset in ipairs(offsets) do
+	for i, offset in ipairs(offsets) do
 		local goal = targetCFrame.Position + offset
 		if #workspace:GetPartBoundsInRadius(goal, 2.5, clearParams) == 0 then
 			-- Lock before the pivot so the hover shield is already holding the spot
@@ -302,12 +308,16 @@ local function teleportTo(object)
 			task.wait(0.1)
 
 			local root = character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart
-			if root and (root.Position - goal).Magnitude < 12 then
+			local dist = root and (root.Position - goal).Magnitude or math.huge
+			if dist < 12 then
+				dlog(string.format("tp ok: offset %d/%d, landed %.1f studs off", i, #offsets, dist))
 				return true
 			end
+			dlog(string.format("tp retry: offset %d was %.1f studs off (server snapped back?)", i, dist))
 		end
 	end
 
+	dlog("tp failed: no clear spot held")
 	floatTarget = nil
 	return false
 end
@@ -355,6 +365,7 @@ local function grabCrystal(crystal)
 		end)
 	end
 
+	dlog("grab fired: remote=" .. tostring(sent) .. " prompt=" .. tostring(prompt ~= nil))
 	return sent
 end
 
@@ -372,6 +383,9 @@ local function hoverGrab(crystal)
 			if not r or (r.Position - part.Position).Magnitude <= 12 then break end
 			task.wait(0.05)
 		end
+		local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+		dlog(string.format("grab: %.1f studs away when firing",
+			(r and part.Parent) and (r.Position - part.Position).Magnitude or -1))
 	end
 
 	task.wait(0.25)
@@ -387,6 +401,7 @@ local function hoverGrab(crystal)
 	while os.clock() < deadline and crystal.Parent and crystalAttr(crystal, "Collected") ~= true do
 		task.wait(0.1)
 	end
+	dlog("grab done: collected=" .. tostring(not crystal.Parent or crystalAttr(crystal, "Collected") == true))
 end
 
 -- Teleport from the search list also mines the crystal (hovers only for the grab)
