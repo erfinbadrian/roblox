@@ -168,6 +168,18 @@ local function stopFloat()
 	floatAppliedHumanoid = nil
 end
 
+-- Is there ground close below? (void check before allowing the fall)
+local function groundBelow(maxDist)
+	local character = LocalPlayer.Character
+	local root = character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
+	if not root then return false end
+
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { character }
+	return workspace:Raycast(root.Position, Vector3.new(0, -(maxDist or 30), 0), params) ~= nil
+end
+
 -- Teleport with fallback offsets: crystals embedded in terrain need a clear spot,
 -- and we verify the avatar actually arrived (server/physics can snap it back)
 local function teleportTo(object)
@@ -809,6 +821,11 @@ local function farmLoop()
 				if teleportTo(best) then
 					-- Hover in mid-air over the crystal: works with no ground below
 					hoverGrab(best)
+					-- Release only over solid ground: fall and land normally there,
+					-- keep hovering when it is void below (falling there = death)
+					if groundBelow(30) then
+						floatTarget = nil
+					end
 
 					local collected = not best.Parent or crystalAttr(best, "Collected") == true
 					if collected then
