@@ -29,29 +29,26 @@ end
 -- 1. HELPER FUNCTIONS
 --------------------------------------------------------------------------------
 
--- Парсинг цены из любого формата ($500k, $500,000, 500k, 500000)
+-- Парсинг цены из любого формата ($500k, $500,000, 10t, 1qa)
+local PRICE_MULTIPLIERS = { k = 1e3, m = 1e6, b = 1e9, t = 1e12, qa = 1e15 }
+
 local function parsePrice(val)
 	if not val then return 0 end
 	local str = tostring(val):gsub(",", ""):lower()
-	
-	-- Ищем число, стоящее сразу после знака $ или просто число с k/m/b
-	local numStr, unit = str:match("(%d+%.?%d*)%s*([kmb]?)")
+
+	local numStr, unit = str:match("(%d+%.?%d*)%s*([a-z]*)")
 	if not numStr then return 0 end
 
 	local number = tonumber(numStr) or 0
-	if unit == "k" then number = number * 1000
-	elseif unit == "m" then number = number * 1000000
-	elseif unit == "b" then number = number * 1000000000 end
-
-	return number
+	return number * (PRICE_MULTIPLIERS[unit] or 1)
 end
 
 -- Извлечение цены из строки ProximityPrompt (например: "[S] Peastone • 0.5kg • $500,000")
 local function extractPriceFromPromptText(text)
 	if not text then return 0, "" end
 	
-	-- Ищем часть с подписью $...
-	local priceMatch = text:match("%$[%d%.,kKmMbB]+")
+	-- Ищем часть с подписью $... (включая суффиксы t/T и qa/QA)
+	local priceMatch = text:match("%$[%d%.,kKmMbBtTqQaA]+")
 	if priceMatch then
 		return parsePrice(priceMatch), priceMatch
 	end
@@ -69,20 +66,37 @@ local function formatPrice(number)
 	return "$" .. formatted
 end
 
+-- Teleport with fallback offsets: crystals embedded in terrain need a clear spot,
+-- and we verify the avatar actually arrived (server/physics can snap it back)
 local function teleportTo(object)
 	local character = LocalPlayer.Character
-	if not character then return end
-	
+	if not character then return false end
+
 	local targetCFrame = nil
 	if object:IsA("BasePart") then
 		targetCFrame = object.CFrame
 	elseif object:IsA("Model") then
 		targetCFrame = object:GetPivot()
 	end
+	if not targetCFrame then return false end
 
-	if targetCFrame then
-		character:PivotTo(targetCFrame + Vector3.new(0, 3, 0))
+	local offsets = {
+		Vector3.new(0, 3, 0), Vector3.new(0, 7, 0), Vector3.new(0, 12, 0), Vector3.new(0, 20, 0),
+		Vector3.new(5, 3, 0), Vector3.new(-5, 3, 0), Vector3.new(0, 3, 5), Vector3.new(0, 3, -5),
+		Vector3.new(9, 6, 0), Vector3.new(-9, 6, 0), Vector3.new(0, 6, 9), Vector3.new(0, 6, -9),
+	}
+
+	for _, offset in ipairs(offsets) do
+		character:PivotTo(targetCFrame + offset)
+		task.wait(0.1)
+
+		local root = character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart
+		if root and (root.Position - (targetCFrame.Position + offset)).Magnitude < 12 then
+			return true
+		end
 	end
+
+	return false
 end
 
 -- Mine one crystal: fire the game remote, then zero the prompt and fire it
@@ -678,29 +692,34 @@ local function farmLoop()
 				end
 			else
 				setStatus("Mining: " .. best.Name .. " (" .. formatPrice(price) .. ")")
-				teleportTo(best)
-				task.wait(0.25)
-				grabCrystal(best)
 
-				-- Wait until collected (or 2s timeout, then move on)
-				local deadline = os.clock() + 2
-				while os.clock() < deadline and best.Parent and best:GetAttribute("Collected") ~= true do
-					task.wait(0.1)
+				if teleportTo(best) then
+					task.wait(0.25)
+					grabCrystal(best)
+
+					-- Wait until collected (or 2s timeout, then move on)
+					local deadline = os.clock() + 2
+					while os.clock() < deadline and best.Parent and best:GetAttribute("Collected") ~= true do
+						task.wait(0.1)
+					end
+
+					local collected = not best.Parent or best:GetAttribute("Collected") == true
+					if collected then
+						fails = 0
+						-- Only a successful collection resets the idle/hop timer
+						lastFoundAt = os.clock()
+					else
+						fails += 1
+						setStatus("Collect failed x" .. fails .. ": " .. best.Name, Color3.fromRGB(255, 150, 90))
+					end
+				else
+					fails += 1
+					setStatus("Teleport blocked x" .. fails .. ": " .. best.Name, Color3.fromRGB(255, 150, 90))
 				end
 
-				local collected = not best.Parent or best:GetAttribute("Collected") == true
-				if collected then
+				if fails >= 3 and sellableWeight() > 0 then
+					sellAll()
 					fails = 0
-					-- Only a successful collection resets the idle/hop timer
-					lastFoundAt = os.clock()
-				else
-					-- Collection failed: could be bag full (estimate off) or an unmineable crystal
-					fails += 1
-					setStatus("Collect failed x" .. fails .. ": " .. best.Name, Color3.fromRGB(255, 150, 90))
-					if fails >= 3 and sellableWeight() > 0 then
-						sellAll()
-						fails = 0
-					end
 				end
 				task.wait(0.15)
 			end
