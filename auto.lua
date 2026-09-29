@@ -98,13 +98,31 @@ local function crystalAttr(crystal, name)
 	return crystalPart(crystal):GetAttribute(name)
 end
 
--- Persistent hover: while floatTarget is set, the character is CFrame-locked
--- mid-air and noclipped, so it never falls between mines and nothing can hit it.
--- Clearing floatTarget (selling, stopping) releases the lock and restores collisions.
+-- Persistent hover: while floatTarget is set, AlignPosition/AlignOrientation movers
+-- fly the character to the target and hold it there (noclipped, PlatformStand),
+-- so it never falls between mines and nothing can hit it. If the server rubber-bands
+-- a teleport, the mover simply flies the character back to the goal.
+-- Clearing floatTarget (selling, stopping) drops the movers and restores collisions.
 local floatTarget = nil
 local floatConn = nil
 local floatAppliedHumanoid = nil
 local floatSolid = setmetatable({}, { __mode = "k" })
+local floatAnchor, floatMover, floatAligner
+
+local function dropFloatMovers()
+	if floatMover then
+		pcall(function() floatMover:Destroy() end)
+		floatMover = nil
+	end
+	if floatAligner then
+		pcall(function() floatAligner:Destroy() end)
+		floatAligner = nil
+	end
+	if floatAnchor then
+		pcall(function() floatAnchor:Destroy() end)
+		floatAnchor = nil
+	end
+end
 
 local function floatHeartbeat()
 	local character = LocalPlayer.Character
@@ -113,15 +131,59 @@ local function floatHeartbeat()
 	if floatTarget then
 		local r = character:FindFirstChild("HumanoidRootPart")
 		if r then
-			r.CFrame = floatTarget
-			r.AssemblyLinearVelocity = Vector3.zero
+			-- Fly-and-hold via physics movers (same recipe the reference script uses):
+			-- no CFrame slam for the server to rubber-band, and a snapped teleport
+			-- self-heals because the mover keeps pulling the character to the goal
+			if not floatMover or floatMover.Parent ~= r then
+				dropFloatMovers()
+				pcall(function()
+					local anchor = Instance.new("Attachment")
+					anchor.Parent = r
+
+					local mover = Instance.new("AlignPosition")
+					mover.Mode = Enum.PositionAlignmentMode.OneAttachment
+					mover.Attachment0 = anchor
+					mover.RigidityEnabled = false
+					mover.ApplyAtCenterOfMass = true
+					mover.MaxForce = 1e7
+					mover.MaxVelocity = math.huge
+					mover.Responsiveness = 200
+					mover.Position = floatTarget.Position
+					mover.Parent = r
+
+					local aligner = Instance.new("AlignOrientation")
+					aligner.Mode = Enum.OrientationAlignmentMode.OneAttachment
+					aligner.Attachment0 = anchor
+					aligner.RigidityEnabled = false
+					aligner.MaxTorque = 1e7
+					aligner.MaxAngularVelocity = math.huge
+					aligner.Responsiveness = 200
+					aligner.CFrame = r.CFrame.Rotation
+					aligner.Parent = r
+
+					floatAnchor, floatMover, floatAligner = anchor, mover, aligner
+				end)
+			end
+			if floatMover then
+				floatMover.Position = floatTarget.Position
+				floatAligner.CFrame = floatTarget
+			end
 		end
 
 		local humanoid = character:FindFirstChildOfClass("Humanoid")
-		if humanoid and humanoid ~= floatAppliedHumanoid then
-			floatAppliedHumanoid = humanoid
-			humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
-			humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+		if humanoid then
+			if humanoid ~= floatAppliedHumanoid then
+				floatAppliedHumanoid = humanoid
+				humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+				humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
+			end
+			humanoid.PlatformStand = true
+			-- Physics state = humanoid controller fully off (no climbing, no
+			-- getting-up forces): the character goes only where the movers take it,
+			-- straight through walls as if there were no wall
+			if humanoid:GetState() ~= Enum.HumanoidStateType.Physics then
+				humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+			end
 		end
 
 		for _, part in ipairs(character:GetDescendants()) do
@@ -131,11 +193,21 @@ local function floatHeartbeat()
 			end
 		end
 	else
-		-- Unlocked: give collisions back so the character can walk/land normally
+		-- Unlocked: drop the flight movers, give collisions and humanoid
+		-- control back so it can fall/walk/land normally
+		dropFloatMovers()
 		for part in pairs(floatSolid) do
 			if part.Parent then part.CanCollide = true end
 		end
 		table.clear(floatSolid)
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if humanoid and floatAppliedHumanoid then
+			humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
+			humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
+			humanoid.PlatformStand = false
+			humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+			floatAppliedHumanoid = nil
+		end
 	end
 end
 
@@ -161,6 +233,7 @@ local function stopFloat()
 		getgenv().CRYSTAL_FLOAT_CONN = nil
 	end
 	floatTarget = nil
+	dropFloatMovers()
 
 	for part in pairs(floatSolid) do
 		if part.Parent then part.CanCollide = true end
@@ -171,6 +244,8 @@ local function stopFloat()
 	if humanoid and humanoid == floatAppliedHumanoid then
 		humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
 		humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
+		humanoid.PlatformStand = false
+		humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
 	end
 	floatAppliedHumanoid = nil
 end
@@ -212,9 +287,11 @@ local function teleportTo(object)
 	}
 
 	-- Skip spots inside walls: spawning in geometry makes physics fling the character
+	-- RespectCanCollide: decorations/VFX must not block, only solid walls
 	local clearParams = OverlapParams.new()
 	clearParams.FilterType = Enum.RaycastFilterType.Exclude
 	clearParams.FilterDescendantsInstances = { character, object }
+	clearParams.RespectCanCollide = true
 
 	for _, offset in ipairs(offsets) do
 		local goal = targetCFrame.Position + offset
@@ -284,6 +361,19 @@ end
 -- Grab while the hover lock holds the character in mid-air over the crystal:
 -- no ground needed, nothing can hit it, and it never falls while the farm runs
 local function hoverGrab(crystal)
+	-- Let the flight finish first: if the teleport was rubber-banded, the mover
+	-- is still flying the character in and the server would reject an out-of-range grab
+	local part = crystalPart(crystal)
+	local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+	if root and part.Parent then
+		local deadline = os.clock() + 1.5
+		while os.clock() < deadline and part.Parent do
+			local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+			if not r or (r.Position - part.Position).Magnitude <= 12 then break end
+			task.wait(0.05)
+		end
+	end
+
 	task.wait(0.25)
 	grabCrystal(crystal)
 
