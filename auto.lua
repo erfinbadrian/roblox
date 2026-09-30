@@ -920,24 +920,29 @@ local failedUntil = setmetatable({}, { __mode = "k" })
 
 local function findBest(minPrice)
 	local best, bestPrice = nil, 0
+	local top, topPrice = nil, 0 -- priciest overall, for the "why not the biggest" log
 	local now = os.clock()
 	for _, folder in ipairs(crystalFolders) do
 		for _, crystal in ipairs(folder:GetChildren()) do
-			-- MinedHP nil = still buried/unexposed: the server refuses collection on
-			-- those (every failed grab all session had HP=nil, both successes had it set).
-			-- Dropped crystals were already exposed and carry no MinedHP, skip the check
-			if crystal.Parent and crystalAttr(crystal, "Collected") ~= true
-				and (failedUntil[crystal] == nil or failedUntil[crystal] <= now)
-				and ((DroppedCrystalsFolder and crystal:IsDescendantOf(DroppedCrystalsFolder))
-					or crystalAttr(crystal, "MinedHP") ~= nil) then
+			if crystal.Parent and crystalAttr(crystal, "Collected") ~= true then
 				local price = crystalPriceOf(crystal)
-				if price >= minPrice and price > bestPrice then
-					best, bestPrice = crystal, price
+				if price > topPrice then
+					top, topPrice = crystal, price
+				end
+				-- MinedHP nil = still buried/unexposed: the server refuses collection on
+				-- those (every failed grab all session had HP=nil, both successes had it set).
+				-- Dropped crystals were already exposed and carry no MinedHP, skip the check
+				if (failedUntil[crystal] == nil or failedUntil[crystal] <= now)
+					and ((DroppedCrystalsFolder and crystal:IsDescendantOf(DroppedCrystalsFolder))
+						or crystalAttr(crystal, "MinedHP") ~= nil) then
+					if price >= minPrice and price > bestPrice then
+						best, bestPrice = crystal, price
+					end
 				end
 			end
 		end
 	end
-	return best, bestPrice
+	return best, bestPrice, top, topPrice
 end
 
 -- Favorite backpack crystals worth >= threshold (favorites are kept by sellAll)
@@ -1109,12 +1114,13 @@ local function farmLoop()
 	local fails = 0
 	local lastFoundAt = os.clock()
 	local waitLogAt = 0
+	local whyLogAt = 0
 
 	while farming do
 		-- Re-read the min price every cycle so it can be changed while farming
 		local minPrice = parsePrice(inputBox.Text)
 		autoFavorite()
-		local best, price = findBest(minPrice)
+		local best, price, top, topPrice = findBest(minPrice)
 
 		if not best then
 			-- Say WHY nothing qualifies, a silent wait hides the cause:
@@ -1152,6 +1158,14 @@ local function farmLoop()
 				end
 			else
 				setStatus("Mining: " .. best.Name .. " (" .. formatPrice(price) .. ")")
+				-- A pricier crystal exists but was filtered: say why, once per 5s
+				if top and top ~= best and topPrice > price and os.clock() - whyLogAt > 5 then
+					whyLogAt = os.clock()
+					dlog(string.format("pricier %s (%s) not targeted: buried=%s skipped=%s",
+						top.Name, formatPrice(topPrice),
+						tostring(crystalAttr(top, "MinedHP") == nil),
+						tostring(failedUntil[top] ~= nil and failedUntil[top] > os.clock())))
+				end
 
 				if teleportTo(best) then
 					hoverGrab(best)
