@@ -478,13 +478,16 @@ local function hoverGrab(crystal)
 
 	-- Keep flying at the crystal the whole time, engines only cut after it is
 	-- collected. No digging, no pickaxe: both successful grabs needed nothing else.
-	-- Big crystals need many holds, a flat 10s window abandoned them half-mined:
-	-- past the base 10s, any MinedHP drop keeps the grab alive (60s hard cap),
-	-- only a 3s stall means the server really refused it
+	-- Big crystals need many holds, and HP drops can arrive in bursts seconds
+	-- apart. Zero progress for 3s past the base 10s = server refusal, move on.
+	-- But once HP has actually dropped we are mid-mine: a 10s gap between drops
+	-- is normal chewing, abandoning there left crystals half-mined and sent the
+	-- farm after the next bigger spawn
 	local grabStart = os.clock()
 	local hardEnd = grabStart + 60
 	local lastHP = crystalAttr(crystal, "MinedHP")
 	local progressAt = grabStart
+	local madeProgress = false
 	while os.clock() < hardEnd and crystal.Parent
 		and crystalAttr(crystal, "Collected") ~= true do
 		floatTarget = CFrame.new(part.Position + Vector3.new(0, 5, 0))
@@ -499,8 +502,14 @@ local function hoverGrab(crystal)
 		if hp ~= nil and lastHP ~= nil and hp < lastHP then
 			lastHP = hp
 			progressAt = now
-		elseif now - grabStart > 10 and now - progressAt > 3 then
-			dlog("grab stalled: no MinedHP progress for 3s, moving on")
+			madeProgress = true
+			-- Still making progress at the cap means a huge crystal: keep going,
+			-- 30s at a time, up to 3 minutes total
+			if now + 30 > hardEnd then
+				hardEnd = math.min(now + 30, grabStart + 180)
+			end
+		elseif now - grabStart > 10 and now - progressAt > (madeProgress and 10 or 3) then
+			dlog("grab stalled: no MinedHP progress for " .. (madeProgress and 10 or 3) .. "s, moving on")
 			break
 		end
 	end
