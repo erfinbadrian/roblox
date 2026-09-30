@@ -1213,25 +1213,19 @@ local function farmLoop()
 						tostring(failedUntil[top] ~= nil and failedUntil[top] > os.clock())))
 				end
 
+				-- Same engines-on/engines-off wrap as the TP + Mine button: the farm
+				-- flew forever between crystals (PlatformStand nonstop), TP + Mine
+				-- lands as a normal avatar after each grab
+				startFloat()
 				if teleportTo(best) then
 					hoverGrab(best)
+					stopFloat()
 
 					local collected = not best.Parent or crystalAttr(best, "Collected") == true
 					if collected then
 						fails = 0
 						-- Only a successful collection resets the idle/hop timer
 						lastFoundAt = os.clock()
-						-- Chain straight to the next exposed crystal: GoHome only when
-						-- idle. Standing at the sell area streams the mountain out and
-						-- the farm would go silent even with items on the server
-						if not findBest(minPrice) and GoHome then
-							floatTarget = nil
-							flyStop()
-							pcall(function() GoHome:FireServer("sell") end)
-							task.wait(1)
-							local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-							if r then r.AssemblyLinearVelocity = Vector3.zero end
-						end
 					else
 						fails += 1
 						setStatus("Collect failed x" .. fails .. ": " .. best.Name, Color3.fromRGB(255, 150, 90))
@@ -1242,13 +1236,16 @@ local function farmLoop()
 						dlog("skip " .. best.Name .. " for " .. skipFor .. "s (collect refused)")
 					end
 				else
+					stopFloat()
 					fails += 1
 					setStatus("Teleport blocked x" .. fails .. ": " .. best.Name, Color3.fromRGB(255, 150, 90))
 					failedUntil[best] = os.clock() + 60
 					dlog("skip " .. best.Name .. " for 60s (tp blocked)")
 				end
 
-				if fails >= 3 and sellableWeight() > 0 then
+				-- Refusals are not a full bag: sell on 3 fails only when the bag is
+				-- truly full, else buried crystals would bus us to the seller nonstop
+				if fails >= 3 and backpackFree() <= 0 and sellableWeight() > 0 then
 					sellAll()
 					fails = 0
 				end
