@@ -519,11 +519,11 @@ local function hoverGrab(crystal)
 			-- Still making progress at the cap means a huge crystal: keep going,
 			-- 30s at a time, up to 3 minutes total
 			if now + 30 > hardEnd then
-				hardEnd = math.min(now + 30, grabStart + 180)
+				hardEnd = math.min(now + 30, grabStart + 600)
 			end
-		elseif now - grabStart > 10 and now - progressAt > (madeProgress and 10 or (DigRequest and 8 or 3)) then
+		elseif now - grabStart > 10 and now - progressAt > (madeProgress and 20 or (DigRequest and 8 or 3)) then
 			dlog("grab stalled: no MinedHP progress for "
-				.. (madeProgress and 10 or (DigRequest and 8 or 3)) .. "s, moving on")
+				.. (madeProgress and 20 or (DigRequest and 8 or 3)) .. "s, moving on")
 			break
 		end
 	end
@@ -1081,7 +1081,7 @@ local function hopServer()
 		else
 			dlog("hop http failed or timed out: " .. tostring(httpErr or "silent for 10s"))
 		end
-	else
+	elseif #candidates == 0 then
 		dlog("hop: no http function on this executor")
 	end
 
@@ -1239,6 +1239,10 @@ local function farmLoop()
 				-- Same engines-on/engines-off wrap as the TP + Mine button: the farm
 				-- flew forever between crystals (PlatformStand nonstop), TP + Mine
 				-- lands as a normal avatar after each grab
+				-- Any real attempt counts as activity: the idle-hop timer used to
+				-- run only on collects, so a T8 mined longer than the idle window
+				-- hopped servers mid-mine
+				lastFoundAt = os.clock()
 				startFloat()
 				if teleportTo(best) then
 					hoverGrab(best)
