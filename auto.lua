@@ -914,14 +914,20 @@ local function sellAll()
 	setStatus(string.format("Sold %.1f kg (favorites kept)", soldKg), Color3.fromRGB(120, 220, 150))
 end
 
+-- Crystals that refused collection or blocked the teleport: skip them for a
+-- minute instead of hammering the same target while good ones wait
+local failedUntil = setmetatable({}, { __mode = "k" })
+
 local function findBest(minPrice)
 	local best, bestPrice = nil, 0
+	local now = os.clock()
 	for _, folder in ipairs(crystalFolders) do
 		for _, crystal in ipairs(folder:GetChildren()) do
 			-- MinedHP nil = still buried/unexposed: the server refuses collection on
 			-- those (every failed grab all session had HP=nil, both successes had it set).
 			-- Dropped crystals were already exposed and carry no MinedHP, skip the check
 			if crystal.Parent and crystalAttr(crystal, "Collected") ~= true
+				and (failedUntil[crystal] == nil or failedUntil[crystal] <= now)
 				and ((DroppedCrystalsFolder and crystal:IsDescendantOf(DroppedCrystalsFolder))
 					or crystalAttr(crystal, "MinedHP") ~= nil) then
 				local price = crystalPriceOf(crystal)
@@ -1169,10 +1175,14 @@ local function farmLoop()
 					else
 						fails += 1
 						setStatus("Collect failed x" .. fails .. ": " .. best.Name, Color3.fromRGB(255, 150, 90))
+						failedUntil[best] = os.clock() + 60
+						dlog("skip " .. best.Name .. " for 60s (collect refused)")
 					end
 				else
 					fails += 1
 					setStatus("Teleport blocked x" .. fails .. ": " .. best.Name, Color3.fromRGB(255, 150, 90))
+					failedUntil[best] = os.clock() + 60
+					dlog("skip " .. best.Name .. " for 60s (tp blocked)")
 				end
 
 				if fails >= 3 and sellableWeight() > 0 then
