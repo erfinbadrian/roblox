@@ -974,11 +974,21 @@ local function hopServer()
 	local candidates = {}
 
 	if req then
-		local ok, res = pcall(req, {
-			Url = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=2&excludeFullGames=true&limit=100",
-			Method = "GET",
-		})
-		if ok and res and res.Body then
+		-- Hard 5s timeout: a request that never resolves must not hang the hop
+		local res, done = nil, false
+		task.spawn(function()
+			local ok, r = pcall(req, {
+				Url = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=2&excludeFullGames=true&limit=100",
+				Method = "GET",
+			})
+			if ok then res = r end
+			done = true
+		end)
+		local t0 = os.clock()
+		while not done and os.clock() - t0 < 5 do
+			task.wait(0.1)
+		end
+		if res and res.Body then
 			local okJson, data = pcall(HttpService.JSONDecode, HttpService, res.Body)
 			if okJson and type(data) == "table" and type(data.data) == "table" then
 				for _, server in ipairs(data.data) do
@@ -986,11 +996,12 @@ local function hopServer()
 						candidates[#candidates + 1] = server.id
 					end
 				end
+				dlog(string.format("hop: %d candidate servers", #candidates))
 			else
 				dlog("hop: server list json unreadable")
 			end
 		else
-			dlog(string.format("hop http failed: code=%s", tostring(res and res.StatusCode or res)))
+			dlog("hop http failed or timed out")
 		end
 	else
 		dlog("hop: no http function on this executor")
@@ -1026,21 +1037,27 @@ local function hopServer()
 		print("[Crystal Farm] queue_on_teleport unavailable, relying on auto-exec loader + cfg file")
 	end
 
-	local okTp, errTp = pcall(function()
-		if #candidates > 0 then
-			TeleportService:TeleportToPlaceInstance(game.PlaceId, candidates[math.random(#candidates)], LocalPlayer)
+	local function tpTo(id)
+		if id then
+			TeleportService:TeleportToPlaceInstance(game.PlaceId, id, LocalPlayer)
 		else
 			TeleportService:Teleport(game.PlaceId, LocalPlayer)
 		end
-	end)
+	end
+	local target = #candidates > 0 and candidates[math.random(#candidates)] or nil
+	local okTp, errTp = pcall(tpTo, target)
 	if not okTp then
-		dlog("hop teleport failed: " .. tostring(errTp))
-		setStatus("Hop failed: " .. tostring(errTp), Color3.fromRGB(255, 90, 90))
+		dlog("hop teleport failed: " .. tostring(errTp) .. ", retrying plain Teleport")
+		pcall(tpTo, nil)
 	end
 
-	-- If the teleport never happened, allow retrying after 8s
-	task.delay(8, function()
-		hopping = false
+	-- If we are still here after 6s the teleport never fired: unstick the farm
+	-- instead of showing Hopping forever
+	task.delay(6, function()
+		if hopping then
+			setStatus("Hop did not fire, farming on", Color3.fromRGB(255, 150, 90))
+			hopping = false
+		end
 	end)
 end
 
