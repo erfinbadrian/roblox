@@ -986,14 +986,20 @@ local function hopServer()
 						candidates[#candidates + 1] = server.id
 					end
 				end
+			else
+				dlog("hop: server list json unreadable")
 			end
+		else
+			dlog(string.format("hop http failed: code=%s", tostring(res and res.StatusCode or res)))
 		end
+	else
+		dlog("hop: no http function on this executor")
 	end
 
 	if #candidates == 0 then
-		setStatus("Hop failed: no open servers or HTTP API unavailable", Color3.fromRGB(255, 90, 90))
-		hopping = false
-		return
+		-- No list (HTTP unavailable or blocked): a plain Teleport still lands us
+		-- on a fresh server instead of failing the hop outright
+		dlog("hop: no server list, falling back to plain Teleport")
 	end
 
 	-- Auto-resume path 1: file config. The auto-exec loader re-runs this script on
@@ -1020,9 +1026,17 @@ local function hopServer()
 		print("[Crystal Farm] queue_on_teleport unavailable, relying on auto-exec loader + cfg file")
 	end
 
-	pcall(function()
-		TeleportService:TeleportToPlaceInstance(game.PlaceId, candidates[math.random(#candidates)], LocalPlayer)
+	local okTp, errTp = pcall(function()
+		if #candidates > 0 then
+			TeleportService:TeleportToPlaceInstance(game.PlaceId, candidates[math.random(#candidates)], LocalPlayer)
+		else
+			TeleportService:Teleport(game.PlaceId, LocalPlayer)
+		end
 	end)
+	if not okTp then
+		dlog("hop teleport failed: " .. tostring(errTp))
+		setStatus("Hop failed: " .. tostring(errTp), Color3.fromRGB(255, 90, 90))
+	end
 
 	-- If the teleport never happened, allow retrying after 8s
 	task.delay(8, function()
