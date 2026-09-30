@@ -1,7 +1,9 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local LocalPlayer = Players.LocalPlayer
+-- Queued teleport scripts can run before LocalPlayer exists, indexing it then
+-- crashes on nil. PlayerAdded:Wait() covers that ultra-early join window
+local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 local CrystalsFolder = workspace:WaitForChild("Things"):WaitForChild("Crystals")
 -- Dropped crystals (out of a player's bag) live in their own folder when it
@@ -999,18 +1001,18 @@ local function hopServer()
 	local candidates = {}
 
 	if req then
-		-- Hard 5s timeout: a request that never resolves must not hang the hop
-		local res, done = nil, false
+		-- Hard 10s timeout: a request that never resolves must not hang the hop
+		local res, done, httpErr = nil, false, nil
 		task.spawn(function()
 			local ok, r = pcall(req, {
 				Url = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=2&excludeFullGames=true&limit=100",
 				Method = "GET",
 			})
-			if ok then res = r end
+			if ok then res = r else httpErr = tostring(r) end
 			done = true
 		end)
 		local t0 = os.clock()
-		while not done and os.clock() - t0 < 5 do
+		while not done and os.clock() - t0 < 10 do
 			task.wait(0.1)
 		end
 		if res and res.Body then
@@ -1026,7 +1028,7 @@ local function hopServer()
 				dlog("hop: server list json unreadable")
 			end
 		else
-			dlog("hop http failed or timed out")
+			dlog("hop http failed or timed out: " .. tostring(httpErr or "silent for 10s"))
 		end
 	else
 		dlog("hop: no http function on this executor")
