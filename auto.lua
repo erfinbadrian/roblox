@@ -1028,13 +1028,18 @@ local function hopServer()
 	end
 
 	-- Auto-resume path 2: queued script for executors that support it
-	if SCRIPT_URL ~= "" and type(queue_on_teleport) == "function" then
-		queue_on_teleport(string.format(
+	-- (some executors name it queueonteleport, try both)
+	local queue_tp = (type(queue_on_teleport) == "function" and queue_on_teleport)
+		or (type(queueonteleport) == "function" and queueonteleport)
+	if SCRIPT_URL ~= "" and queue_tp then
+		queue_tp(string.format(
 			'shared.CRYSTAL_CFG={min=%q,fav=%q,idle=%q,autostart=%s};loadstring(game:HttpGet("%s"))()',
 			inputBox.Text, favInput.Text, hopIdleInput.Text, tostring(farming), SCRIPT_URL
 		))
+		dlog("hop resume: queued via queue_on_teleport")
 	else
-		print("[Crystal Farm] queue_on_teleport unavailable, relying on auto-exec loader + cfg file")
+		-- print() never reaches the Macsploit console, dlog does
+		dlog("hop resume: no queue_on_teleport, relying on auto-exec loader + cfg file")
 	end
 
 	local function tpTo(id)
