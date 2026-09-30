@@ -1000,7 +1000,25 @@ local function hopServer()
 
 	local candidates = {}
 
-	if req then
+	-- Feeder file from the Mac side (fetch_servers.sh): executor HTTP hangs
+	-- forever here, so the server list arrives via readfile instead of a request
+	if type(readfile) == "function" then
+		local ok, raw = pcall(readfile, "server_list.json")
+		if ok and type(raw) == "string" and raw ~= "" then
+			local okJson, data = pcall(HttpService.JSONDecode, HttpService, raw)
+			if okJson and type(data) == "table" and type(data.servers) == "table"
+				and os.time() - (data.savedAt or 0) < 300 then
+				for _, id in ipairs(data.servers) do
+					if id ~= game.JobId then
+						candidates[#candidates + 1] = id
+					end
+				end
+				dlog("hop: " .. #candidates .. " candidate servers from feeder file")
+			end
+		end
+	end
+
+	if req and #candidates == 0 then
 		-- Hard 10s timeout: a request that never resolves must not hang the hop
 		local res, done, httpErr = nil, false, nil
 		task.spawn(function()
@@ -1254,6 +1272,13 @@ farmBtn.MouseButton1Click:Connect(function()
 		startFarm()
 	end
 end)
+
+-- Tell the Mac-side feeder (fetch_servers.sh) which place/job to list servers for
+if type(writefile) == "function" then
+	pcall(function()
+		writefile("crystal_place.txt", game.PlaceId .. " " .. game.JobId)
+	end)
+end
 
 -- Restore settings after a server hop: queued script config first,
 -- else the cfg file written while hopping (auto-exec loader path)
