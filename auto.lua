@@ -929,15 +929,12 @@ local function findBest(minPrice)
 				if price > topPrice then
 					top, topPrice = crystal, price
 				end
-				-- MinedHP nil = still buried/unexposed: the server refuses collection on
-				-- those (every failed grab all session had HP=nil, both successes had it set).
-				-- Dropped crystals were already exposed and carry no MinedHP, skip the check
+				-- No MinedHP pre-filter: it wrongly excluded minable crystals
+				-- (TP + Mine collects them fine). A buried one costs a single
+				-- failed grab, then the blacklist skips it for minutes
 				if (failedUntil[crystal] == nil or failedUntil[crystal] <= now)
-					and ((DroppedCrystalsFolder and crystal:IsDescendantOf(DroppedCrystalsFolder))
-						or crystalAttr(crystal, "MinedHP") ~= nil) then
-					if price >= minPrice and price > bestPrice then
-						best, bestPrice = crystal, price
-					end
+					and price >= minPrice and price > bestPrice then
+					best, bestPrice = crystal, price
 				end
 			end
 		end
@@ -1189,8 +1186,11 @@ local function farmLoop()
 					else
 						fails += 1
 						setStatus("Collect failed x" .. fails .. ": " .. best.Name, Color3.fromRGB(255, 150, 90))
-						failedUntil[best] = os.clock() + 60
-						dlog("skip " .. best.Name .. " for 60s (collect refused)")
+						-- Buried (MinedHP nil) refuses every grab: park it 5 min.
+						-- A normal refusal only gets 1 min
+						local skipFor = crystalAttr(best, "MinedHP") == nil and 300 or 60
+						failedUntil[best] = os.clock() + skipFor
+						dlog("skip " .. best.Name .. " for " .. skipFor .. "s (collect refused)")
 					end
 				else
 					fails += 1
