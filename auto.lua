@@ -408,6 +408,16 @@ local function grabCrystal(crystal)
 		end)
 	end
 
+	-- Buried crystals (MinedHP nil) refuse HoldComplete forever, the log showed
+	-- the farm bouncing T7 to T7 collecting nothing. Dig them out: DigRequest's
+	-- exact signature is unknown, so fire both shapes it plausibly takes (the
+	-- part, or a world position), pcalls keep a wrong shape harmless
+	if DigRequest and crystalAttr(crystal, "MinedHP") == nil then
+		local p = crystalPart(crystal)
+		pcall(function() DigRequest:FireServer(p) end)
+		pcall(function() DigRequest:FireServer(p.Position) end)
+	end
+
 	local prompt = crystal:FindFirstChildWhichIsA("ProximityPrompt", true)
 	if prompt then
 		local saved = {
@@ -511,8 +521,9 @@ local function hoverGrab(crystal)
 			if now + 30 > hardEnd then
 				hardEnd = math.min(now + 30, grabStart + 180)
 			end
-		elseif now - grabStart > 10 and now - progressAt > (madeProgress and 10 or 3) then
-			dlog("grab stalled: no MinedHP progress for " .. (madeProgress and 10 or 3) .. "s, moving on")
+		elseif now - grabStart > 10 and now - progressAt > (madeProgress and 10 or (DigRequest and 8 or 3)) then
+			dlog("grab stalled: no MinedHP progress for "
+				.. (madeProgress and 10 or (DigRequest and 8 or 3)) .. "s, moving on")
 			break
 		end
 	end
