@@ -1032,10 +1032,28 @@ local function hopServer()
 	local queue_tp = (type(queue_on_teleport) == "function" and queue_on_teleport)
 		or (type(queueonteleport) == "function" and queueonteleport)
 	if SCRIPT_URL ~= "" and queue_tp then
-		queue_tp(string.format(
-			'shared.CRYSTAL_CFG={min=%q,fav=%q,idle=%q,autostart=%s};loadstring(game:HttpGet("%s"))()',
-			inputBox.Text, favInput.Text, hopIdleInput.Text, tostring(farming), SCRIPT_URL
-		))
+		-- Self-diagnosing queued string: errors here are invisible in the console,
+		-- so every step writes crystal_hop_trace.txt (read it after a dead hop)
+		queue_tp(string.format([[
+			local function trace(m)
+				if writefile then pcall(writefile, "crystal_hop_trace.txt", tostring(m)) end
+			end
+			trace("queued ran " .. os.time())
+			shared.CRYSTAL_CFG = {min=%q, fav=%q, idle=%q, autostart=%s}
+			local src
+			for i = 1, 3 do
+				local ok, res = pcall(game.HttpGet, game, "%s")
+				if ok and type(res) == "string" and #res > 0 then src = res break end
+				trace("HttpGet " .. i .. " failed: " .. tostring(res))
+				task.wait(2)
+			end
+			if src then
+				local okRun, err = pcall(loadstring(src))
+				trace(okRun and "farm loadstring ok" or ("loadstring error: " .. tostring(err)))
+			else
+				trace("HttpGet gave up")
+			end
+		]], inputBox.Text, favInput.Text, hopIdleInput.Text, tostring(farming), SCRIPT_URL))
 		dlog("hop resume: queued via queue_on_teleport")
 	else
 		-- print() never reaches the Macsploit console, dlog does
