@@ -4,6 +4,12 @@ local RunService = game:GetService("RunService")
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 local CrystalsFolder = workspace:WaitForChild("Things"):WaitForChild("Crystals")
+-- Dropped crystals (out of a player's bag) live in their own folder when it
+-- exists; the reference scans it too, those items are invisible to a
+-- Crystals-only scan
+local DroppedCrystalsFolder = workspace:FindFirstChild("DroppedCrystals")
+	or workspace:WaitForChild("DroppedCrystals", 5)
+local crystalFolders = { CrystalsFolder, DroppedCrystalsFolder }
 
 -- Mining remote (recipe from the open-source Mine a Mountain script)
 local Remotes = ReplicatedStorage:FindFirstChild("Remotes") or ReplicatedStorage:WaitForChild("Remotes", 5)
@@ -11,6 +17,7 @@ local HoldComplete = Remotes and Remotes:FindFirstChild("CrystalHoldComplete")
 local SellRequest = Remotes and Remotes:FindFirstChild("SellRequest")
 local GoHome = Remotes and Remotes:FindFirstChild("GoHome")
 local ToggleFavorite = Remotes and Remotes:FindFirstChild("ToggleFavorite")
+local DigRequest = Remotes and Remotes:FindFirstChild("DigRequest")
 
 -- Server hop: paste the raw URL of this script (e.g. your gist raw link) to auto-resume after hopping
 local SCRIPT_URL = "https://raw.githubusercontent.com/erfinbadrian/roblox/refs/heads/main/auto.lua"
@@ -31,6 +38,9 @@ end)
 
 if PlayerGui:FindFirstChild("CrystalFinderGui") then
 	PlayerGui.CrystalFinderGui:Destroy()
+end
+if PlayerGui:FindFirstChild("CrystalTraceGui") then
+	PlayerGui.CrystalTraceGui:Destroy()
 end
 
 --------------------------------------------------------------------------------
@@ -64,10 +74,64 @@ local function extractPriceFromPromptText(text)
 	return 0, ""
 end
 
--- Trace prints so teleport/grab failures are visible in the executor console
+-- Trace overlay: print() does not reliably reach the Macsploit console, so draw
+-- the last lines on screen (top-left) and also warn() them for the F9 console
 local DEBUG = true
+local traceLabel, traceScroll
+local traceAuto = true
+local traceLines = {}
 local function dlog(msg)
-	if DEBUG then print("[CrystalFarm] " .. msg) end
+	if not DEBUG then return end
+	msg = "[CF] " .. msg
+	warn(msg)
+	if rconsoleprint then pcall(rconsoleprint, msg .. "\n") end
+	traceLines[#traceLines + 1] = msg
+	if #traceLines > 500 then table.remove(traceLines, 1) end
+	if traceLabel then
+		traceLabel.Text = table.concat(traceLines, "\n")
+		if traceAuto and traceScroll then
+			traceScroll.CanvasPosition = Vector2.new(0, 1e6)
+		end
+	end
+	-- full log as a real file: open "Documents/Macsploit Workspace/crystal_farm_log.txt"
+	if writefile then pcall(writefile, "crystal_farm_log.txt", table.concat(traceLines, "\n")) end
+end
+
+do
+	local traceGui = Instance.new("ScreenGui")
+	traceGui.Name = "CrystalTraceGui"
+	traceGui.ResetOnSpawn = false
+	traceGui.Parent = PlayerGui
+
+	traceScroll = Instance.new("ScrollingFrame")
+	traceScroll.Position = UDim2.new(0, 10, 0, 10)
+	traceScroll.Size = UDim2.new(0, 460, 0, 140)
+	traceScroll.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	traceScroll.BackgroundTransparency = 0.35
+	traceScroll.BorderSizePixel = 0
+	traceScroll.ScrollBarThickness = 4
+	traceScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	traceScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+	traceScroll.Parent = traceGui
+
+	traceLabel = Instance.new("TextLabel")
+	traceLabel.Size = UDim2.new(1, -8, 0, 0)
+	traceLabel.BackgroundTransparency = 1
+	traceLabel.TextColor3 = Color3.fromRGB(120, 255, 120)
+	traceLabel.TextSize = 12
+	traceLabel.Font = Enum.Font.Code
+	traceLabel.TextXAlignment = Enum.TextXAlignment.Left
+	traceLabel.TextYAlignment = Enum.TextYAlignment.Top
+	traceLabel.TextWrapped = true
+	traceLabel.AutomaticSize = Enum.AutomaticSize.Y
+	traceLabel.Text = ""
+	traceLabel.Parent = traceScroll
+
+	-- auto-follow the newest line, but stop following while scrolled up
+	traceScroll:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+		local max = traceScroll.AbsoluteCanvasSize.Y - traceScroll.AbsoluteWindowSize.Y
+		traceAuto = max - traceScroll.CanvasPosition.Y < 24
+	end)
 end
 
 local function formatPrice(number)
@@ -104,116 +168,70 @@ local function crystalAttr(crystal, name)
 	return crystalPart(crystal):GetAttribute(name)
 end
 
--- Persistent hover: while floatTarget is set, AlignPosition/AlignOrientation movers
--- fly the character to the target and hold it there (noclipped, PlatformStand),
--- so it never falls between mines and nothing can hit it. If the server rubber-bands
--- a teleport, the mover simply flies the character back to the goal.
--- Clearing floatTarget (selling, stopping) drops the movers and restores collisions.
+-- Flight, FlyGuiV3 recipe: BodyGyro + BodyVelocity on the root with PlatformStand
+-- while airborne, no noclip and no forced humanoid states. Stopping destroys the
+-- bodies and returns the humanoid to normal, so the character grabs crystals as
+-- a plain standing/falling avatar, exactly like a real player
 local floatTarget = nil
 local floatConn = nil
-local floatAppliedHumanoid = nil
-local floatSolid = setmetatable({}, { __mode = "k" })
-local floatAnchor, floatMover, floatAligner
+local flyBV, flyBG
 
-local function dropFloatMovers()
-	if floatMover then
-		pcall(function() floatMover:Destroy() end)
-		floatMover = nil
+local function flyStop()
+	if flyBV then
+		-- Kill residual speed: landing with leftover flight velocity is what
+		-- triggers the game's RagdollRequest/FallDamage on every engine cut
+		local root = flyBV.Parent
+		if root and root:IsA("BasePart") then
+			pcall(function() root.AssemblyLinearVelocity = Vector3.zero end)
+		end
+		pcall(function() flyBV:Destroy() end)
+		flyBV = nil
 	end
-	if floatAligner then
-		pcall(function() floatAligner:Destroy() end)
-		floatAligner = nil
+	if flyBG then
+		pcall(function() flyBG:Destroy() end)
+		flyBG = nil
 	end
-	if floatAnchor then
-		pcall(function() floatAnchor:Destroy() end)
-		floatAnchor = nil
+	local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid.PlatformStand = false
 	end
 end
 
 local function floatHeartbeat()
 	local character = LocalPlayer.Character
-	if not character then return end
+	local root = character and character:FindFirstChild("HumanoidRootPart")
+	if not root then return end
 
 	if floatTarget then
-		local r = character:FindFirstChild("HumanoidRootPart")
-		if r then
-			-- Fly-and-hold via physics movers (same recipe the reference script uses):
-			-- no CFrame slam for the server to rubber-band, and a snapped teleport
-			-- self-heals because the mover keeps pulling the character to the goal
-			if not floatMover or floatMover.Parent ~= r then
-				dropFloatMovers()
-				pcall(function()
-					local anchor = Instance.new("Attachment")
-					anchor.Parent = r
+		if not flyBV or flyBV.Parent ~= root then
+			flyStop()
+			flyBG = Instance.new("BodyGyro")
+			flyBG.P = 9e4
+			flyBG.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
+			flyBG.CFrame = root.CFrame
+			flyBG.Parent = root
 
-					local mover = Instance.new("AlignPosition")
-					mover.Mode = Enum.PositionAlignmentMode.OneAttachment
-					mover.Attachment0 = anchor
-					mover.RigidityEnabled = false
-					mover.ApplyAtCenterOfMass = true
-					mover.MaxForce = 1e7
-					mover.MaxVelocity = math.huge
-					mover.Responsiveness = 200
-					mover.Position = floatTarget.Position
-					mover.Parent = r
-
-					local aligner = Instance.new("AlignOrientation")
-					aligner.Mode = Enum.OrientationAlignmentMode.OneAttachment
-					aligner.Attachment0 = anchor
-					aligner.RigidityEnabled = false
-					aligner.MaxTorque = 1e7
-					aligner.MaxAngularVelocity = math.huge
-					aligner.Responsiveness = 200
-					aligner.CFrame = r.CFrame.Rotation
-					aligner.Parent = r
-
-					floatAnchor, floatMover, floatAligner = anchor, mover, aligner
-				end)
-			end
-			if floatMover then
-				floatMover.Position = floatTarget.Position
-				floatAligner.CFrame = floatTarget
-			end
+			flyBV = Instance.new("BodyVelocity")
+			flyBV.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+			flyBV.Velocity = Vector3.new(0, 0.1, 0)
+			flyBV.Parent = root
 		end
 
 		local humanoid = character:FindFirstChildOfClass("Humanoid")
 		if humanoid then
-			if humanoid ~= floatAppliedHumanoid then
-				floatAppliedHumanoid = humanoid
-				humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
-				humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
-			end
 			humanoid.PlatformStand = true
-			-- Physics state = humanoid controller fully off (no climbing, no
-			-- getting-up forces): the character goes only where the movers take it,
-			-- straight through walls as if there were no wall
-			if humanoid:GetState() ~= Enum.HumanoidStateType.Physics then
-				humanoid:ChangeState(Enum.HumanoidStateType.Physics)
-			end
 		end
 
-		for _, part in ipairs(character:GetDescendants()) do
-			if part:IsA("BasePart") and part.CanCollide then
-				floatSolid[part] = true
-				part.CanCollide = false
-			end
+		local delta = floatTarget.Position - root.Position
+		local dist = delta.Magnitude
+		if dist > 0.5 then
+			flyBV.Velocity = delta.Unit * math.min(dist * 4, 120)
+			flyBG.CFrame = CFrame.lookAt(root.Position, floatTarget.Position)
+		else
+			flyBV.Velocity = Vector3.zero
 		end
 	else
-		-- Unlocked: drop the flight movers, give collisions and humanoid
-		-- control back so it can fall/walk/land normally
-		dropFloatMovers()
-		for part in pairs(floatSolid) do
-			if part.Parent then part.CanCollide = true end
-		end
-		table.clear(floatSolid)
-		local humanoid = character:FindFirstChildOfClass("Humanoid")
-		if humanoid and floatAppliedHumanoid then
-			humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
-			humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
-			humanoid.PlatformStand = false
-			humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
-			floatAppliedHumanoid = nil
-		end
+		flyStop()
 	end
 end
 
@@ -239,33 +257,7 @@ local function stopFloat()
 		getgenv().CRYSTAL_FLOAT_CONN = nil
 	end
 	floatTarget = nil
-	dropFloatMovers()
-
-	for part in pairs(floatSolid) do
-		if part.Parent then part.CanCollide = true end
-	end
-	table.clear(floatSolid)
-
-	local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-	if humanoid and humanoid == floatAppliedHumanoid then
-		humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
-		humanoid:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
-		humanoid.PlatformStand = false
-		humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
-	end
-	floatAppliedHumanoid = nil
-end
-
--- Is there ground close below? (void check before allowing the fall)
-local function groundBelow(maxDist)
-	local character = LocalPlayer.Character
-	local root = character and (character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart)
-	if not root then return false end
-
-	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	params.FilterDescendantsInstances = { character }
-	return workspace:Raycast(root.Position, Vector3.new(0, -(maxDist or 30), 0), params) ~= nil
+	flyStop()
 end
 
 -- Teleport with fallback offsets: crystals embedded in terrain need a clear spot,
@@ -293,16 +285,17 @@ local function teleportTo(object)
 	}
 
 	-- Skip spots inside walls: spawning in geometry makes physics fling the character
-	-- RespectCanCollide: decorations/VFX must not block, only solid walls
+	-- RespectCanCollide: decorations/VFX must not block, only solid walls.
+	-- Crystals are not walls: dropped items pile up and would block every offset
 	local clearParams = OverlapParams.new()
 	clearParams.FilterType = Enum.RaycastFilterType.Exclude
-	clearParams.FilterDescendantsInstances = { character, object }
+	clearParams.FilterDescendantsInstances = { character, object, CrystalsFolder, DroppedCrystalsFolder }
 	clearParams.RespectCanCollide = true
 
 	for i, offset in ipairs(offsets) do
 		local goal = targetCFrame.Position + offset
 		if #workspace:GetPartBoundsInRadius(goal, 2.5, clearParams) == 0 then
-			-- Lock before the pivot so the hover shield is already holding the spot
+			-- Set the flight goal before the pivot so engines catch the spot instantly
 			floatTarget = targetCFrame + offset
 			character:PivotTo(floatTarget)
 			task.wait(0.1)
@@ -317,9 +310,91 @@ local function teleportTo(object)
 		end
 	end
 
+	-- Last resort: force the high spot over the target. Crowded targets can block
+	-- every "clear" offset, and open air above is fine because the flight holds it
+	floatTarget = targetCFrame + Vector3.new(0, 20, 0)
+	character:PivotTo(floatTarget)
+	task.wait(0.1)
+	local root = character:FindFirstChild("HumanoidRootPart") or character.PrimaryPart
+	if root and (root.Position - floatTarget.Position).Magnitude < 12 then
+		dlog("tp forced: high spot over a crowded target")
+		return true
+	end
 	dlog("tp failed: no clear spot held")
 	floatTarget = nil
 	return false
+end
+
+-- Backpack weight vs capacity (base math from the reference script)
+local function backpackWeight()
+	local total = 0
+	local function scan(container)
+		if not container then return end
+		for _, child in ipairs(container:GetChildren()) do
+			if child:IsA("Tool") and child:GetAttribute("Tier") ~= nil then
+				total += tonumber(child:GetAttribute("WeightKg")) or 0
+			end
+		end
+	end
+	scan(LocalPlayer:FindFirstChildOfClass("Backpack"))
+	scan(LocalPlayer.Character)
+	return total
+end
+
+-- Weight of crystals that would actually sell (favorites are kept)
+local function sellableWeight()
+	local total = 0
+	local function scan(container)
+		if not container then return end
+		for _, child in ipairs(container:GetChildren()) do
+			if child:IsA("Tool") and child:GetAttribute("Tier") ~= nil and child:GetAttribute("Favorited") ~= true then
+				total += tonumber(child:GetAttribute("WeightKg")) or 0
+			end
+		end
+	end
+	scan(LocalPlayer:FindFirstChildOfClass("Backpack"))
+	scan(LocalPlayer.Character)
+	return total
+end
+
+local function ownsGamepass(name)
+	local folder = LocalPlayer:FindFirstChild("GamepassesOwned")
+	local flag = folder and folder:FindFirstChild(name)
+	return flag ~= nil and flag:IsA("BoolValue") and flag.Value == true
+end
+
+local function hasActiveRune(keyword)
+	local data = LocalPlayer:FindFirstChild("PlayerData")
+	local plot = data and data:FindFirstChild("PlotData")
+	local runes = plot and plot:FindFirstChild("Runes")
+	if not runes then return false end
+	for _, child in ipairs(runes:GetChildren()) do
+		local runeName = child:GetAttribute("RuneName")
+		if type(runeName) == "string" and runeName:find(keyword, 1, true) then
+			if (tonumber(child:GetAttribute("Remaining")) or 0) > 0 then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function backpackFree()
+	if LocalPlayer:GetAttribute("InfBackpack") == true then
+		return math.huge
+	end
+	local data = LocalPlayer:FindFirstChild("PlayerData")
+	local stats = data and data:FindFirstChild("RealStats")
+	local capacity = 10
+	if stats then
+		local base = stats:FindFirstChild("CarryWeight")
+		local bonus = stats:FindFirstChild("CarryWeightBonus")
+		if base then capacity = base.Value end
+		if bonus then capacity += bonus.Value end
+	end
+	if ownsGamepass("CarryKgPlus4") then capacity *= 4 end
+	if hasActiveRune("Weight") then capacity *= 2 end
+	return capacity - backpackWeight()
 end
 
 -- Mine one crystal: fire the game remote, then zero the prompt and fire it
@@ -365,12 +440,11 @@ local function grabCrystal(crystal)
 		end)
 	end
 
-	dlog("grab fired: remote=" .. tostring(sent) .. " prompt=" .. tostring(prompt ~= nil))
 	return sent
 end
 
--- Grab while the hover lock holds the character in mid-air over the crystal:
--- no ground needed, nothing can hit it, and it never falls while the farm runs
+-- Fly to the crystal, stop flying, then grab it as a normal character. Retries
+-- (fly in again) if the server still refuses, then gives up so the loop moves on
 local function hoverGrab(crystal)
 	-- Let the flight finish first: if the teleport was rubber-banded, the mover
 	-- is still flying the character in and the server would reject an out-of-range grab
@@ -384,24 +458,36 @@ local function hoverGrab(crystal)
 			task.wait(0.05)
 		end
 		local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-		dlog(string.format("grab: %.1f studs away when firing",
-			(r and part.Parent) and (r.Position - part.Position).Magnitude or -1))
+		dlog(string.format("grab: %.1f studs away, target %s '%s' HP=%s",
+			(r and part.Parent) and (r.Position - part.Position).Magnitude or -1,
+			part.ClassName, part.Name, tostring(crystalAttr(crystal, "MinedHP"))))
 	end
 
-	task.wait(0.25)
-	grabCrystal(crystal)
-
-	-- One retry if the first fire did not take
-	task.wait(0.5)
-	if crystal.Parent and crystalAttr(crystal, "Collected") ~= true then
-		grabCrystal(crystal)
+	-- Trace: dump target state once so every run is comparable. bagFree matters:
+	-- the server silently refuses collection when the crystal is heavier than
+	-- the remaining capacity (the reference skips those too)
+	dlog(string.format("attrs: %s Value=%s WeightKg=%s Tier=%s MinedHP=%s Collected=%s bagFree=%s",
+		part:GetFullName(), tostring(part:GetAttribute("Value")), tostring(part:GetAttribute("WeightKg")),
+		tostring(part:GetAttribute("Tier")), tostring(part:GetAttribute("MinedHP")),
+		tostring(part:GetAttribute("Collected")), tostring(backpackFree())))
+	if (tonumber(part:GetAttribute("WeightKg")) or 0) > backpackFree() then
+		dlog("grab will be refused: bag has less free weight than this crystal, sell first")
 	end
 
-	local deadline = os.clock() + 1.2
-	while os.clock() < deadline and crystal.Parent and crystalAttr(crystal, "Collected") ~= true do
-		task.wait(0.1)
+	-- Keep flying at the crystal the whole time, engines only cut after it is
+	-- collected. No digging, no pickaxe: both successful grabs needed nothing else
+	local grabEnd = os.clock() + 10
+	while os.clock() < grabEnd and crystal.Parent
+		and crystalAttr(crystal, "Collected") ~= true do
+		floatTarget = CFrame.new(part.Position + Vector3.new(0, 5, 0))
+
+		for _ = 1, 3 do
+			grabCrystal(crystal)
+			task.wait(0.2)
+		end
 	end
-	dlog("grab done: collected=" .. tostring(not crystal.Parent or crystalAttr(crystal, "Collected") == true))
+	dlog(string.format("grab done: collected=%s",
+		tostring(not crystal.Parent or crystalAttr(crystal, "Collected") == true)))
 end
 
 -- Teleport from the search list also mines the crystal (hovers only for the grab)
@@ -601,10 +687,89 @@ listLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
 end)
 
 --------------------------------------------------------------------------------
--- 3. SEARCH LOGIC FOR PROXIMITYPROMPT
+-- 3. HIDE CHEAP CRYSTALS (perf: hundreds of rendered crystals + hover tag GUIs = lag)
+--------------------------------------------------------------------------------
+local hiddenState = setmetatable({}, { __mode = "k" }) -- instance -> saved Transparency/Enabled
+
+local function crystalPriceOf(crystal)
+	local prompt = crystal:FindFirstChildWhichIsA("ProximityPrompt", true)
+	local price = prompt and extractPriceFromPromptText(prompt.ObjectText .. " " .. prompt.ActionText) or 0
+	if price == 0 then
+		-- prompt text missing or not replicated yet: the Value attribute is the price
+		price = tonumber(crystalAttr(crystal, "Value")) or 0
+	end
+	return price
+end
+
+local function setCrystalVisible(crystal, visible)
+	local list = {}
+	if crystal:IsA("BasePart") then
+		list[1] = crystal
+	else
+		for _, d in ipairs(crystal:GetDescendants()) do
+			if d:IsA("BasePart") or d:IsA("BillboardGui") or d:IsA("SurfaceGui") then
+				list[#list + 1] = d
+			end
+		end
+	end
+	for _, inst in ipairs(list) do
+		local isPart = inst:IsA("BasePart")
+		if visible then
+			local saved = hiddenState[inst]
+			if saved ~= nil then
+				if isPart then inst.Transparency = saved else inst.Enabled = saved end
+				hiddenState[inst] = nil
+			end
+		else
+			if hiddenState[inst] == nil then
+				hiddenState[inst] = isPart and inst.Transparency or inst.Enabled
+			end
+			if isPart then inst.Transparency = 1 else inst.Enabled = false end
+		end
+	end
+end
+
+local function refreshHide()
+	local minPrice = parsePrice(inputBox.Text)
+	for _, folder in ipairs(crystalFolders) do
+		for _, crystal in ipairs(folder:GetChildren()) do
+			setCrystalVisible(crystal, minPrice <= 0 or crystalPriceOf(crystal) >= minPrice)
+		end
+	end
+end
+
+if getgenv and getgenv().CRYSTAL_HIDE_CONN then
+	pcall(function() getgenv().CRYSTAL_HIDE_CONN:Disconnect() end)
+	getgenv().CRYSTAL_HIDE_CONN = nil
+end
+local hideConn = CrystalsFolder.ChildAdded:Connect(function(crystal)
+	task.wait(0.5) -- let the prompt text replicate before judging its price
+	local minPrice = parsePrice(inputBox.Text)
+	setCrystalVisible(crystal, minPrice <= 0 or crystalPriceOf(crystal) >= minPrice)
+end)
+if getgenv then
+	getgenv().CRYSTAL_HIDE_CONN = hideConn
+end
+
+-- Re-judge on a timer too: streamed-in parts come back visible, and a fresh
+-- crystal judged before its prompt text replicated stays wrongly hidden/shown
+if getgenv then
+	getgenv().CRYSTAL_HIDE_GEN = (getgenv().CRYSTAL_HIDE_GEN or 0) + 1
+end
+local hideGen = (getgenv and getgenv().CRYSTAL_HIDE_GEN) or 1
+task.spawn(function()
+	while (getgenv and getgenv().CRYSTAL_HIDE_GEN or hideGen) == hideGen do
+		task.wait(3)
+		pcall(refreshHide)
+	end
+end)
+
+--------------------------------------------------------------------------------
+-- 4. SEARCH LOGIC FOR PROXIMITYPROMPT
 --------------------------------------------------------------------------------
 
 local function scanCrystals()
+	refreshHide()
 	for _, child in ipairs(scrollFrame:GetChildren()) do
 		if child:IsA("Frame") or child:IsA("TextLabel") then
 			child:Destroy()
@@ -613,26 +778,30 @@ local function scanCrystals()
 
 	local minPrice = parsePrice(inputBox.Text)
 	local crystalList = {}
+	local withPrompt, total = 0, 0
 
-	for _, crystal in ipairs(CrystalsFolder:GetChildren()) do
-		local prompt = crystal:FindFirstChildWhichIsA("ProximityPrompt", true)
-		
-		if prompt then
+	for _, folder in ipairs(crystalFolders) do
+		for _, crystal in ipairs(folder:GetChildren()) do
+			total += 1
+			local prompt = crystal:FindFirstChildWhichIsA("ProximityPrompt", true)
+			if prompt then
+				withPrompt += 1
+			end
 			-- Текст может быть как в ObjectText, так и в ActionText
-			local fullText = prompt.ObjectText .. " " .. prompt.ActionText
-			local numericPrice, rawPriceStr = extractPriceFromPromptText(fullText)
-
+			local fullText = prompt and (prompt.ObjectText .. " " .. prompt.ActionText) or ""
+			local numericPrice = crystalPriceOf(crystal)
 			if numericPrice >= minPrice then
 				table.insert(crystalList, {
 					Object = crystal,
 					Name = crystal.Name,
 					Price = numericPrice,
 					FullText = fullText,
-					RawPrice = rawPriceStr
 				})
 			end
 		end
 	end
+	dlog(string.format("scan: %d total, %d with prompt, %d listed, min=%s",
+		total, withPrompt, #crystalList, formatPrice(minPrice)))
 
 	-- Сортировка по цене
 	table.sort(crystalList, function(a, b) return a.Price > b.Price end)
@@ -694,6 +863,19 @@ end
 searchBtn.MouseButton1Click:Connect(scanCrystals)
 scanCrystals()
 
+-- Auto refresh like the reference script (10s): streaming-late items appear
+-- in the list without pressing Search again
+if getgenv then
+	getgenv().CRYSTAL_SCAN_GEN = (getgenv().CRYSTAL_SCAN_GEN or 0) + 1
+end
+local scanGen = (getgenv and getgenv().CRYSTAL_SCAN_GEN) or 1
+task.spawn(function()
+	while (getgenv and getgenv().CRYSTAL_SCAN_GEN or scanGen) == scanGen do
+		task.wait(10)
+		pcall(scanCrystals)
+	end
+end)
+
 --------------------------------------------------------------------------------
 -- 4. AUTO FARM LOOP
 --------------------------------------------------------------------------------
@@ -703,78 +885,6 @@ local farming = false
 local function setStatus(text, color)
 	statusLabel.Text = text
 	statusLabel.TextColor3 = color or Color3.fromRGB(220, 220, 220)
-end
-
--- Backpack weight vs capacity (base math from the reference script)
-local function backpackWeight()
-	local total = 0
-	local function scan(container)
-		if not container then return end
-		for _, child in ipairs(container:GetChildren()) do
-			if child:IsA("Tool") and child:GetAttribute("Tier") ~= nil then
-				total += tonumber(child:GetAttribute("WeightKg")) or 0
-			end
-		end
-	end
-	scan(LocalPlayer:FindFirstChildOfClass("Backpack"))
-	scan(LocalPlayer.Character)
-	return total
-end
-
--- Weight of crystals that would actually sell (favorites are kept)
-local function sellableWeight()
-	local total = 0
-	local function scan(container)
-		if not container then return end
-		for _, child in ipairs(container:GetChildren()) do
-			if child:IsA("Tool") and child:GetAttribute("Tier") ~= nil and child:GetAttribute("Favorited") ~= true then
-				total += tonumber(child:GetAttribute("WeightKg")) or 0
-			end
-		end
-	end
-	scan(LocalPlayer:FindFirstChildOfClass("Backpack"))
-	scan(LocalPlayer.Character)
-	return total
-end
-
-local function ownsGamepass(name)
-	local folder = LocalPlayer:FindFirstChild("GamepassesOwned")
-	local flag = folder and folder:FindFirstChild(name)
-	return flag ~= nil and flag:IsA("BoolValue") and flag.Value == true
-end
-
-local function hasActiveRune(keyword)
-	local data = LocalPlayer:FindFirstChild("PlayerData")
-	local plot = data and data:FindFirstChild("PlotData")
-	local runes = plot and plot:FindFirstChild("Runes")
-	if not runes then return false end
-	for _, child in ipairs(runes:GetChildren()) do
-		local runeName = child:GetAttribute("RuneName")
-		if type(runeName) == "string" and runeName:find(keyword, 1, true) then
-			if (tonumber(child:GetAttribute("Remaining")) or 0) > 0 then
-				return true
-			end
-		end
-	end
-	return false
-end
-
-local function backpackFree()
-	if LocalPlayer:GetAttribute("InfBackpack") == true then
-		return math.huge
-	end
-	local data = LocalPlayer:FindFirstChild("PlayerData")
-	local stats = data and data:FindFirstChild("RealStats")
-	local capacity = 10
-	if stats then
-		local base = stats:FindFirstChild("CarryWeight")
-		local bonus = stats:FindFirstChild("CarryWeightBonus")
-		if base then capacity = base.Value end
-		if bonus then capacity += bonus.Value end
-	end
-	if ownsGamepass("CarryKgPlus4") then capacity *= 4 end
-	if hasActiveRune("Weight") then capacity *= 2 end
-	return capacity - backpackWeight()
 end
 
 -- Sell everything except favorited crystals
@@ -806,11 +916,15 @@ end
 
 local function findBest(minPrice)
 	local best, bestPrice = nil, 0
-	for _, crystal in ipairs(CrystalsFolder:GetChildren()) do
-		if crystal.Parent and crystalAttr(crystal, "Collected") ~= true then
-			local prompt = crystal:FindFirstChildWhichIsA("ProximityPrompt", true)
-			if prompt then
-				local price = extractPriceFromPromptText(prompt.ObjectText .. " " .. prompt.ActionText)
+	for _, folder in ipairs(crystalFolders) do
+		for _, crystal in ipairs(folder:GetChildren()) do
+			-- MinedHP nil = still buried/unexposed: the server refuses collection on
+			-- those (every failed grab all session had HP=nil, both successes had it set).
+			-- Dropped crystals were already exposed and carry no MinedHP, skip the check
+			if crystal.Parent and crystalAttr(crystal, "Collected") ~= true
+				and ((DroppedCrystalsFolder and crystal:IsDescendantOf(DroppedCrystalsFolder))
+					or crystalAttr(crystal, "MinedHP") ~= nil) then
+				local price = crystalPriceOf(crystal)
 				if price >= minPrice and price > bestPrice then
 					best, bestPrice = crystal, price
 				end
@@ -923,6 +1037,7 @@ end)
 local function farmLoop()
 	local fails = 0
 	local lastFoundAt = os.clock()
+	local waitLogAt = 0
 
 	while farming do
 		-- Re-read the min price every cycle so it can be changed while farming
@@ -931,13 +1046,28 @@ local function farmLoop()
 		local best, price = findBest(minPrice)
 
 		if not best then
+			-- Say WHY nothing qualifies, a silent wait hides the cause:
+			-- total low = crystals streamed out (standing too far, e.g. sell area),
+			-- exposed low = everything still buried (MinedHP nil, server refuses)
+			local total, exposed = 0, 0
+			for _, folder in ipairs(crystalFolders) do
+				for _, c in ipairs(folder:GetChildren()) do
+					total += 1
+					if crystalAttr(c, "MinedHP") ~= nil then exposed += 1 end
+				end
+			end
+			if os.clock() - waitLogAt > 5 then
+				waitLogAt = os.clock()
+				dlog(string.format("no target: %d replicated, %d exposed, min=%s",
+					total, exposed, formatPrice(minPrice)))
+			end
+			setStatus(string.format("Waiting: %d crystals, %d exposed", total, exposed))
 			-- Auto-hop when nothing qualifying has spawned for N minutes
 			local hopMin = tonumber(hopIdleInput.Text) or 0
 			if hopMin > 0 and os.clock() - lastFoundAt > hopMin * 60 then
 				lastFoundAt = os.clock()
 				hopServer()
 			end
-			setStatus("Waiting for crystals >= " .. formatPrice(minPrice) .. "...")
 			task.wait(1)
 		else
 			-- Bag full for this crystal: sell first, but only if something can actually sell
@@ -953,19 +1083,24 @@ local function farmLoop()
 				setStatus("Mining: " .. best.Name .. " (" .. formatPrice(price) .. ")")
 
 				if teleportTo(best) then
-					-- Hover in mid-air over the crystal: works with no ground below
 					hoverGrab(best)
-					-- Release only over solid ground: fall and land normally there,
-					-- keep hovering when it is void below (falling there = death)
-					if groundBelow(30) then
-						floatTarget = nil
-					end
 
 					local collected = not best.Parent or crystalAttr(best, "Collected") == true
 					if collected then
 						fails = 0
 						-- Only a successful collection resets the idle/hop timer
 						lastFoundAt = os.clock()
+						-- Chain straight to the next exposed crystal: GoHome only when
+						-- idle. Standing at the sell area streams the mountain out and
+						-- the farm would go silent even with items on the server
+						if not findBest(minPrice) and GoHome then
+							floatTarget = nil
+							flyStop()
+							pcall(function() GoHome:FireServer("sell") end)
+							task.wait(1)
+							local r = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+							if r then r.AssemblyLinearVelocity = Vector3.zero end
+						end
 					else
 						fails += 1
 						setStatus("Collect failed x" .. fails .. ": " .. best.Name, Color3.fromRGB(255, 150, 90))
