@@ -985,6 +985,7 @@ local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
 
 local hopping = false
+local hopTries = 0 -- re-hops after landing in the same server (no server list on this executor)
 local function hopServer()
 	if hopping then return end
 	hopping = true
@@ -1046,6 +1047,8 @@ local function hopServer()
 				fav = favInput.Text,
 				idle = hopIdleInput.Text,
 				autostart = true,
+				lastJob = game.JobId,
+				hopTries = hopTries,
 				savedAt = os.time(),
 			}))
 		end)
@@ -1063,7 +1066,7 @@ local function hopServer()
 				if writefile then pcall(writefile, "crystal_hop_trace.txt", tostring(m)) end
 			end
 			trace("queued ran " .. os.time())
-			shared.CRYSTAL_CFG = {min=%q, fav=%q, idle=%q, autostart=%s}
+			shared.CRYSTAL_CFG = {min=%q, fav=%q, idle=%q, autostart=%s, lastJob=%q, hopTries=%d}
 			-- Local file first: game:HttpGet hangs forever on this executor, so the
 			-- GitHub fetch is only the fallback when auto.lua is missing on disk
 			local src
@@ -1088,7 +1091,7 @@ local function hopServer()
 			else
 				trace("HttpGet gave up")
 			end
-		]], inputBox.Text, favInput.Text, hopIdleInput.Text, tostring(farming), SCRIPT_URL))
+		]], inputBox.Text, favInput.Text, hopIdleInput.Text, tostring(farming), game.JobId, hopTries, SCRIPT_URL))
 		dlog("hop resume: queued via queue_on_teleport")
 	else
 		-- print() never reaches the Macsploit console, dlog does
@@ -1268,4 +1271,11 @@ if cfg then
 	if cfg.fav then favInput.Text = cfg.fav end
 	if cfg.idle then hopIdleInput.Text = cfg.idle end
 	if cfg.autostart then startFarm() end
+	-- Plain Teleport (no server list on this executor) lets the matchmaker drop
+	-- us right back into the SAME server. Same JobId after a hop = hop again, max 3
+	hopTries = (cfg.lastJob == game.JobId) and (tonumber(cfg.hopTries) or 0) + 1 or 0
+	if farming and hopTries > 0 and hopTries <= 3 then
+		dlog(string.format("hop landed in the same server (try %d), re-hopping", hopTries))
+		task.delay(3, hopServer)
+	end
 end
