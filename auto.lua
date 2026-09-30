@@ -924,11 +924,21 @@ local function sellAll()
 	-- No unfavorite here: the game's SellRequest("all") skips favorited items,
 	-- which is exactly what keeps the high-value favorites in the bag
 	pcall(function() GoHome:FireServer("sell") end)
-	task.wait(0.6)
-	pcall(function() SellRequest:FireServer("all") end)
-	task.wait(3)
+	task.wait(1)
+
+	-- Fire until the bag stops shrinking: a sell fired while still traveling to
+	-- the seller is silently ignored, one early shot left items behind
+	local prev = sellableBefore
+	for i = 1, 5 do
+		pcall(function() SellRequest:FireServer("all") end)
+		task.wait(1)
+		local now = sellableWeight()
+		if i >= 2 and now >= prev then break end
+		prev = now
+	end
 
 	local soldKg = math.max(0, sellableBefore - sellableWeight())
+	dlog(string.format("sold %.1f kg, %.1f kg sellable left (favorites kept)", soldKg, sellableWeight()))
 	setStatus(string.format("Sold %.1f kg (favorites kept)", soldKg), Color3.fromRGB(120, 220, 150))
 end
 
