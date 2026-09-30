@@ -1040,12 +1040,23 @@ local function hopServer()
 			end
 			trace("queued ran " .. os.time())
 			shared.CRYSTAL_CFG = {min=%q, fav=%q, idle=%q, autostart=%s}
+			-- Local file first: game:HttpGet hangs forever on this executor, so the
+			-- GitHub fetch is only the fallback when auto.lua is missing on disk
 			local src
-			for i = 1, 3 do
-				local ok, res = pcall(game.HttpGet, game, "%s")
-				if ok and type(res) == "string" and #res > 0 then src = res break end
-				trace("HttpGet " .. i .. " failed: " .. tostring(res))
-				task.wait(2)
+			if readfile then
+				local okF, raw = pcall(readfile, "auto.lua")
+				if okF and type(raw) == "string" and #raw > 0 then
+					src = raw
+					trace("file src " .. #raw .. " bytes")
+				end
+			end
+			if not src then
+				for i = 1, 3 do
+					local ok, res = pcall(game.HttpGet, game, "%s")
+					if ok and type(res) == "string" and #res > 0 then src = res break end
+					trace("HttpGet " .. i .. " failed: " .. tostring(res))
+					task.wait(2)
+				end
 			end
 			if src then
 				local okRun, err = pcall(loadstring(src))
