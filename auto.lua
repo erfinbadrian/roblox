@@ -492,9 +492,12 @@ local function hoverGrab(crystal)
 		and crystalAttr(crystal, "Collected") ~= true do
 		floatTarget = CFrame.new(part.Position + Vector3.new(0, 5, 0))
 
-		for _ = 1, 3 do
+		-- Mining speed = hold-remote ticks per second. Big crystals chew for
+		-- minutes at the old 5 ticks/s, so double it; the stall detector above
+		-- still backs off if the server starts throttling the spam
+		for _ = 1, 6 do
 			grabCrystal(crystal)
-			task.wait(0.2)
+			task.wait(0.1)
 		end
 
 		local hp = crystalAttr(crystal, "MinedHP")
