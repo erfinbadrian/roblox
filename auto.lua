@@ -732,10 +732,8 @@ listLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
 end)
 
 --------------------------------------------------------------------------------
--- 3. HIDE CHEAP CRYSTALS (perf: hundreds of rendered crystals + hover tag GUIs = lag)
+-- 3. HIDE CHEAP CRYSTALS (perf: 18k rendered crystals + hover tag GUIs = lag)
 --------------------------------------------------------------------------------
-local hiddenState = setmetatable({}, { __mode = "k" }) -- instance -> saved Transparency/Enabled
-
 local function crystalPriceOf(crystal)
 	local prompt = crystal:FindFirstChildWhichIsA("ProximityPrompt", true)
 	local price = prompt and extractPriceFromPromptText(prompt.ObjectText .. " " .. prompt.ActionText) or 0
@@ -746,41 +744,55 @@ local function crystalPriceOf(crystal)
 	return price
 end
 
-local function setCrystalVisible(crystal, visible)
-	local list = {}
-	if crystal:IsA("BasePart") then
-		list[1] = crystal
-	else
-		for _, d in ipairs(crystal:GetDescendants()) do
-			if d:IsA("BasePart") or d:IsA("BillboardGui") or d:IsA("SurfaceGui") then
-				list[#list + 1] = d
-			end
-		end
-	end
-	for _, inst in ipairs(list) do
-		local isPart = inst:IsA("BasePart")
-		if visible then
-			local saved = hiddenState[inst]
-			if saved ~= nil then
-				if isPart then inst.Transparency = saved else inst.Enabled = saved end
-				hiddenState[inst] = nil
-			end
-		else
-			if hiddenState[inst] == nil then
-				hiddenState[inst] = isPart and inst.Transparency or inst.Enabled
-			end
-			if isPart then inst.Transparency = 1 else inst.Enabled = false end
-		end
+-- Closet: cheap crystals are MOVED out of workspace (into PlayerGui) instead of
+-- Transparency=1. Invisible MeshParts still cost render and scan time, and every
+-- hide/list sweep re-walked all 18k of them; outside the folder they cost nothing
+-- and the sweeps shrink to the visible few. Client-side only, the server never
+-- knows, and moving them back restores them untouched
+local closet = Instance.new("Folder")
+closet.Name = "CrystalCloset"
+closet.Parent = PlayerGui
+local hiddenParent = setmetatable({}, { __mode = "k" }) -- crystal -> original folder
+local lastHideMin
+
+local function hideCrystal(crystal)
+	if crystal.Parent == closet then return end
+	hiddenParent[crystal] = crystal.Parent
+	crystal.Parent = closet
+end
+
+local function showCrystal(crystal)
+	local p = hiddenParent[crystal]
+	if p and p.Parent then
+		crystal.Parent = p
+		hiddenParent[crystal] = nil
 	end
 end
 
 local function refreshHide()
 	local minPrice = parsePrice(inputBox.Text)
+	local rejudge = minPrice ~= lastHideMin
+	lastHideMin = minPrice
+	local n = 0
 	for _, folder in ipairs(crystalFolders) do
 		for _, crystal in ipairs(folder:GetChildren()) do
-			setCrystalVisible(crystal, minPrice <= 0 or crystalPriceOf(crystal) >= minPrice)
+			if minPrice > 0 and crystalPriceOf(crystal) < minPrice then
+				hideCrystal(crystal)
+				n += 1
+				if n % 1000 == 0 then task.wait() end -- 18k reparents in one frame = freeze
+			end
 		end
 	end
+	-- Re-judge the closet only when the bar moves: walking 18k hidden crystals
+	-- every 3s would reintroduce the lag the closet exists to kill
+	if rejudge then
+		for _, crystal in ipairs(closet:GetChildren()) do
+			if minPrice <= 0 or crystalPriceOf(crystal) >= minPrice then
+				showCrystal(crystal)
+			end
+		end
+	end
+	if n > 0 then dlog("closeted " .. n .. " cheap crystals (client-side)") end
 end
 
 if getgenv and getgenv().CRYSTAL_HIDE_CONN then
@@ -790,7 +802,9 @@ end
 local hideConn = CrystalsFolder.ChildAdded:Connect(function(crystal)
 	task.wait(0.5) -- let the prompt text replicate before judging its price
 	local minPrice = parsePrice(inputBox.Text)
-	setCrystalVisible(crystal, minPrice <= 0 or crystalPriceOf(crystal) >= minPrice)
+	if minPrice > 0 and crystalPriceOf(crystal) < minPrice then
+		hideCrystal(crystal)
+	end
 end)
 if getgenv then
 	getgenv().CRYSTAL_HIDE_CONN = hideConn
@@ -1197,7 +1211,7 @@ local function farmLoop()
 
 		if not best then
 			-- Say WHY nothing qualifies, a silent wait hides the cause:
-			-- total low = crystals streamed out (standing too far, e.g. sell area),
+			-- total low = everything cheap (closeted) or streamed out,
 			-- exposed low = everything still buried (MinedHP nil, server refuses)
 			local total, exposed = 0, 0
 			for _, folder in ipairs(crystalFolders) do
@@ -1208,7 +1222,7 @@ local function farmLoop()
 			end
 			if os.clock() - waitLogAt > 5 then
 				waitLogAt = os.clock()
-				dlog(string.format("no target: %d replicated, %d exposed, min=%s",
+				dlog(string.format("no target: %d visible, %d exposed, min=%s",
 					total, exposed, formatPrice(minPrice)))
 			end
 			setStatus(string.format("Waiting: %d crystals, %d exposed", total, exposed))
