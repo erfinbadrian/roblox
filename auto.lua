@@ -20,6 +20,7 @@ local SellRequest = Remotes and Remotes:FindFirstChild("SellRequest")
 local GoHome = Remotes and Remotes:FindFirstChild("GoHome")
 local ToggleFavorite = Remotes and Remotes:FindFirstChild("ToggleFavorite")
 local DigRequest = Remotes and Remotes:FindFirstChild("DigRequest")
+local PlotPlaceRequest = Remotes and Remotes:FindFirstChild("PlotPlaceRequest")
 
 -- Server hop: paste the raw URL of this script (e.g. your gist raw link) to auto-resume after hopping
 local SCRIPT_URL = "https://raw.githubusercontent.com/erfinbadrian/roblox/refs/heads/main/auto.lua"
@@ -1033,6 +1034,75 @@ local function autoFavorite()
 	scan(LocalPlayer.Character)
 end
 
+-- Favorites belong on the plot as displays (that is where their luck bonus
+-- works), not stuck in the bag. Spy recipe:
+-- PlotPlaceRequest(tool.Name, x, y, z, rotation, tool), tool equipped, in range
+-- of the plot. Your claimed slot is named after you under Things.Plots.Slots
+local placeTriedAt = setmetatable({}, { __mode = "k" })
+
+local function placeFavorites()
+	if not PlotPlaceRequest then return end
+	local slots = workspace:FindFirstChild("Things")
+		and workspace.Things:FindFirstChild("Plots")
+		and workspace.Things.Plots:FindFirstChild("Slots")
+	local plot = slots and slots:FindFirstChild(LocalPlayer.Name)
+	if not plot then
+		return -- no claimed plot on this server
+	end
+
+	-- The server distance-checks placement like every other remote: stand on
+	-- the plot first, same engines wrap as the mining branch
+	startFloat()
+	local ok = teleportTo(plot)
+	if not ok then
+		stopFloat()
+		return
+	end
+
+	local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+	local center = plot:IsA("Model") and plot:GetPivot().Position
+		or (plot:FindFirstChildWhichIsA("BasePart", true) or plot).Position
+	local placed = 0
+
+	local function try(container)
+		if not container or placed >= 3 then return end
+		for _, tool in ipairs(container:GetChildren()) do
+			if placed >= 3 then break end
+			if tool:IsA("Tool") and tool:GetAttribute("Favorited") == true
+				and os.clock() - (placeTriedAt[tool] or 0) > 30 then
+				placeTriedAt[tool] = os.clock()
+
+				-- Ground height under a random plot spot: a spot colliding with
+				-- an existing display just gets refused, the 30s retry lands elsewhere
+				local rp = RaycastParams.new()
+				rp.FilterType = Enum.RaycastFilterType.Exclude
+				rp.FilterDescendantsInstances = { plot, LocalPlayer.Character }
+				local hit = workspace:Raycast(
+					Vector3.new(center.X + math.random(-20, 20), center.Y + 50, center.Z + math.random(-20, 20)),
+					Vector3.new(0, -200, 0), rp)
+				if hit then
+					if humanoid then
+						pcall(function() humanoid:EquipTool(tool) end)
+					end
+					pcall(function()
+						PlotPlaceRequest:FireServer(tool.Name, hit.Position.X, hit.Position.Y, hit.Position.Z, 0, tool)
+					end)
+					placed += 1
+				end
+			end
+		end
+	end
+	try(LocalPlayer:FindFirstChildOfClass("Backpack"))
+	try(LocalPlayer.Character)
+	if humanoid then
+		pcall(function() humanoid:UnequipTools() end)
+	end
+	stopFloat()
+	if placed > 0 then
+		dlog("placing " .. placed .. " favorite(s) on the plot")
+	end
+end
+
 -- Server hop: join a random open server, queue auto-resume if SCRIPT_URL is set
 local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
@@ -1207,6 +1277,7 @@ local function farmLoop()
 		-- Re-read the min price every cycle so it can be changed while farming
 		local minPrice = parsePrice(inputBox.Text)
 		autoFavorite()
+		placeFavorites()
 		local best, price, top, topPrice = findBest(minPrice)
 
 		if not best then
