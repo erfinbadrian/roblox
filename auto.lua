@@ -484,11 +484,9 @@ local function hoverGrab(crystal)
 	end
 
 	-- Keep flying at the crystal the whole time, engines only cut after it is
-	-- collected. Big crystals chew for minutes and the server accepts hold ticks
-	-- slowly, so the stall window depends on progress:
-	--   HP never dropped: 8s (3s without DigRequest) = refusal, move on
-	--   HP dropped once:  20s is a normal gap between ticks, breaking there
-	--                     left crystals half-mined for the next bigger spawn
+	-- collected. Big crystals chew for minutes, the server accepts hold ticks
+	-- slowly, and digging out a buried one takes many DigRequests, so anything
+	-- that can still progress gets a 20s window; only a no-dig refusal gets 3s
 	local grabStart = os.clock()
 	local hardEnd = grabStart + 60
 	local lastHP = crystalAttr(crystal, "MinedHP")
@@ -508,7 +506,15 @@ local function hoverGrab(crystal)
 
 		local hp = crystalAttr(crystal, "MinedHP")
 		local now = os.clock()
-		if hp ~= nil and lastHP ~= nil and hp < lastHP then
+		if hp ~= nil and lastHP == nil then
+			-- The dig just broke through: exposure is progress too. The log
+			-- showed grabs quitting right as a buried crystal exposed (skip said
+			-- 60s, not the 300s buried rate), then the blacklist parked it
+			lastHP = hp
+			progressAt = now
+			madeProgress = true
+		end
+		if hp ~= nil and hp < lastHP then
 			lastHP = hp
 			progressAt = now
 			madeProgress = true
@@ -518,9 +524,9 @@ local function hoverGrab(crystal)
 				hardEnd = math.min(now + 30, grabStart + 600)
 			end
 		else
-			local stall = madeProgress and 20 or (DigRequest and 8 or 3)
+			local stall = (madeProgress or DigRequest) and 20 or 3
 			if now - grabStart > 10 and now - progressAt > stall then
-				dlog("grab stalled: no MinedHP progress for " .. stall .. "s, moving on")
+				dlog("grab stalled: no progress for " .. stall .. "s, moving on")
 				break
 			end
 		end
