@@ -49,7 +49,7 @@ end
 -- 1. HELPER FUNCTIONS
 --------------------------------------------------------------------------------
 
--- Парсинг цены из любого формата ($500k, $500,000, 10t, 1qa)
+-- Parse a price in any format ($500k, $500,000, 10t, 1qa)
 local PRICE_MULTIPLIERS = { k = 1e3, m = 1e6, b = 1e9, t = 1e12, qa = 1e15 }
 
 local function parsePrice(val)
@@ -63,7 +63,7 @@ local function parsePrice(val)
 	return number * (PRICE_MULTIPLIERS[unit] or 1)
 end
 
--- Извлечение цены из строки ProximityPrompt (например: "[S] Peastone • 0.5kg • $500,000")
+-- Pull the price out of a ProximityPrompt string (e.g. "[S] Peastone • 0.5kg • $500,000")
 local function extractPriceFromPromptText(text)
 	if not text then return 0, "" end
 	
@@ -401,9 +401,8 @@ end
 
 -- Mine one crystal: fire the game remote, then zero the prompt and fire it
 local function grabCrystal(crystal)
-	local sent = false
 	if HoldComplete then
-		sent = pcall(function()
+		pcall(function()
 			HoldComplete:FireServer(crystalPart(crystal))
 		end)
 	end
@@ -434,12 +433,12 @@ local function grabCrystal(crystal)
 		end)
 
 		if typeof(fireproximityprompt) == "function" then
-			sent = pcall(fireproximityprompt, prompt, 1) or sent
+			pcall(fireproximityprompt, prompt, 1)
 		else
-			sent = pcall(function()
+			pcall(function()
 				prompt:InputHoldBegin()
 				prompt:InputHoldEnd()
-			end) or sent
+			end)
 		end
 
 		task.delay(0.2, function()
@@ -451,8 +450,6 @@ local function grabCrystal(crystal)
 			end
 		end)
 	end
-
-	return sent
 end
 
 -- Fly to the crystal, stop flying, then grab it as a normal character. Retries
@@ -487,12 +484,11 @@ local function hoverGrab(crystal)
 	end
 
 	-- Keep flying at the crystal the whole time, engines only cut after it is
-	-- collected. No digging, no pickaxe: both successful grabs needed nothing else.
-	-- Big crystals need many holds, and HP drops can arrive in bursts seconds
-	-- apart. Zero progress for 3s past the base 10s = server refusal, move on.
-	-- But once HP has actually dropped we are mid-mine: a 10s gap between drops
-	-- is normal chewing, abandoning there left crystals half-mined and sent the
-	-- farm after the next bigger spawn
+	-- collected. Big crystals chew for minutes and the server accepts hold ticks
+	-- slowly, so the stall window depends on progress:
+	--   HP never dropped: 8s (3s without DigRequest) = refusal, move on
+	--   HP dropped once:  20s is a normal gap between ticks, breaking there
+	--                     left crystals half-mined for the next bigger spawn
 	local grabStart = os.clock()
 	local hardEnd = grabStart + 60
 	local lastHP = crystalAttr(crystal, "MinedHP")
@@ -517,14 +513,16 @@ local function hoverGrab(crystal)
 			progressAt = now
 			madeProgress = true
 			-- Still making progress at the cap means a huge crystal: keep going,
-			-- 30s at a time, up to 3 minutes total
+			-- 30s at a time, up to 10 minutes total
 			if now + 30 > hardEnd then
 				hardEnd = math.min(now + 30, grabStart + 600)
 			end
-		elseif now - grabStart > 10 and now - progressAt > (madeProgress and 20 or (DigRequest and 8 or 3)) then
-			dlog("grab stalled: no MinedHP progress for "
-				.. (madeProgress and 20 or (DigRequest and 8 or 3)) .. "s, moving on")
-			break
+		else
+			local stall = madeProgress and 20 or (DigRequest and 8 or 3)
+			if now - grabStart > 10 and now - progressAt > stall then
+				dlog("grab stalled: no MinedHP progress for " .. stall .. "s, moving on")
+				break
+			end
 		end
 	end
 	dlog(string.format("grab done: collected=%s",
@@ -828,7 +826,7 @@ local function scanCrystals()
 			if prompt then
 				withPrompt += 1
 			end
-			-- Текст может быть как в ObjectText, так и в ActionText
+			-- Price text can live in ObjectText or ActionText
 			local fullText = prompt and (prompt.ObjectText .. " " .. prompt.ActionText) or ""
 			local numericPrice = crystalPriceOf(crystal)
 			if numericPrice >= minPrice then
@@ -844,7 +842,7 @@ local function scanCrystals()
 	dlog(string.format("scan: %d total, %d with prompt, %d listed, min=%s",
 		total, withPrompt, #crystalList, formatPrice(minPrice)))
 
-	-- Сортировка по цене
+	-- Sort by price, priciest first
 	table.sort(crystalList, function(a, b) return a.Price > b.Price end)
 
 	if #crystalList == 0 then
@@ -918,7 +916,7 @@ task.spawn(function()
 end)
 
 --------------------------------------------------------------------------------
--- 4. AUTO FARM LOOP
+-- 5. AUTO FARM LOOP
 --------------------------------------------------------------------------------
 
 local farming = false
@@ -1251,8 +1249,6 @@ local function farmLoop()
 					local collected = not best.Parent or crystalAttr(best, "Collected") == true
 					if collected then
 						fails = 0
-						-- Only a successful collection resets the idle/hop timer
-						lastFoundAt = os.clock()
 					else
 						fails += 1
 						setStatus("Collect failed x" .. fails .. ": " .. best.Name, Color3.fromRGB(255, 150, 90))
