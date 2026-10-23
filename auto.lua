@@ -21,6 +21,7 @@ local GoHome = Remotes and Remotes:FindFirstChild("GoHome")
 local ToggleFavorite = Remotes and Remotes:FindFirstChild("ToggleFavorite")
 local DigRequest = Remotes and Remotes:FindFirstChild("DigRequest")
 local PlotPlaceRequest = Remotes and Remotes:FindFirstChild("PlotPlaceRequest")
+local PlotPlaceResult = Remotes and Remotes:FindFirstChild("PlotPlaceResult")
 
 -- Server hop: paste the raw URL of this script (e.g. your gist raw link) to auto-resume after hopping
 local SCRIPT_URL = "https://raw.githubusercontent.com/erfinbadrian/roblox/refs/heads/main/auto.lua"
@@ -1043,6 +1044,18 @@ local farming = false -- declared here so placeFavorites sees it (it runs before
 local placeTriedAt = setmetatable({}, { __mode = "k" })
 local noPlotLogAt = 0
 
+-- The server reports every placement outcome on this remote: log it instead of
+-- guessing between "spot blocked" and "capacity full"
+if PlotPlaceResult and PlotPlaceResult:IsA("RemoteEvent") then
+	PlotPlaceResult.OnClientEvent:Connect(function(...)
+		local parts = {}
+		for i = 1, select("#", ...) do
+			parts[i] = tostring((select(i, ...)))
+		end
+		dlog("place: server said: " .. table.concat(parts, ", "))
+	end)
+end
+
 local function placeFavorites()
 	if not PlotPlaceRequest then return end
 	local slots = workspace:FindFirstChild("Things")
@@ -1089,34 +1102,53 @@ local function placeFavorites()
 		or (plot:FindFirstChildWhichIsA("BasePart", true) or plot).Position
 	local placed, refused = 0, 0
 
+	-- Ground spot probing. Two traps found in the logs: v1 excluded the plot
+	-- from the ray (rays fell through, nothing ever fired), and v2 accepted ANY
+	-- plot hit, which is usually the roof of an already-placed display (a Titan
+	-- stands 40+ studs tall; our refused attempts sat at Y 50-66 while real
+	-- placements sit on the floor at one flat Y). So: probe a spread of spots,
+	-- the LOWEST hit is the floor level, and only near-floor hits count as
+	-- placeable ground
+	local rp = RaycastParams.new()
+	rp.FilterType = Enum.RaycastFilterType.Exclude
+	rp.FilterDescendantsInstances = { LocalPlayer.Character, CrystalsFolder, DroppedCrystalsFolder }
+	local function probe()
+		return workspace:Raycast(
+			Vector3.new(center.X + math.random(-25, 25), center.Y + 80, center.Z + math.random(-25, 25)),
+			Vector3.new(0, -300, 0), rp)
+	end
+	local floorY = nil
+	for _ = 1, 12 do
+		local h = probe()
+		if h and h.Instance:IsDescendantOf(plot) and (floorY == nil or h.Position.Y < floorY) then
+			floorY = h.Position.Y
+		end
+	end
+	if floorY then
+		dlog(string.format("place: floor level detected at Y=%.1f", floorY))
+	else
+		stopFloat()
+		dlog("place: no plot geometry found under the probe spread, giving up this trip")
+		return
+	end
+
 	-- Try every candidate in this one visit: refused spots park 60s, so a
 	-- re-run only picks up what still makes sense. Stop-Auto-Farm aborts mid-place
 	for _, tool in ipairs(candidates) do
 		if not farming then break end
 		placeTriedAt[tool] = os.clock()
 
-		-- Ground spot on the plot. The plot itself must stay hittable: v1 put
-		-- the plot in the ray's exclude list, the ray fell through the floor,
-		-- hit was always nil, and not one placement ever fired
-		local rp = RaycastParams.new()
-		rp.FilterType = Enum.RaycastFilterType.Exclude
-		rp.FilterDescendantsInstances = { LocalPlayer.Character, CrystalsFolder, DroppedCrystalsFolder }
-		-- The anchor part can be the sign at the plot edge, so a random spot
-		-- around it can land OFF the plot: only accept hits on this plot's own
-		-- geometry, a few spots before giving up on this tool
 		local hit
-		for _ = 1, 8 do
-			local h = workspace:Raycast(
-				Vector3.new(center.X + math.random(-18, 18), center.Y + 50, center.Z + math.random(-18, 18)),
-				Vector3.new(0, -200, 0), rp)
-			if h and h.Instance:IsDescendantOf(plot) then
+		for _ = 1, 12 do
+			local h = probe()
+			if h and h.Instance:IsDescendantOf(plot) and h.Position.Y <= floorY + 2 then
 				hit = h
 				break
 			end
 		end
 		if not hit then
 			refused += 1
-			dlog("place: " .. tool.Name .. " no plot-floor spot found in 8 tries")
+			dlog("place: " .. tool.Name .. " no free floor spot found in 12 tries")
 		else
 			if humanoid then
 				pcall(function() humanoid:EquipTool(tool) end)
