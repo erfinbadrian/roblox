@@ -940,8 +940,6 @@ end)
 -- 5. AUTO FARM LOOP
 --------------------------------------------------------------------------------
 
-local farming = false
-
 local function setStatus(text, color)
 	statusLabel.Text = text
 	statusLabel.TextColor3 = color or Color3.fromRGB(220, 220, 220)
@@ -1038,9 +1036,12 @@ end
 -- their luck bonus works). Spy recipe (remote_spy_out.txt, 2026-10-01):
 -- PlotPlaceRequest(toolName, x, y, z, rotation, tool), tool EQUIPPED, standing
 -- on the plot. Your claimed slot is named after you under Things.Plots.Slots.
--- Every step dlogs, so a run is readable in crystal_farm_log.txt
+-- Runs BEFORE the farm loop starts and again only when favorites jam the bag
+-- full: place trips mid-farm fought the mining teleports for the same flight
+-- state. Every step dlogs, so a run is readable in crystal_farm_log.txt
+local farming = false -- declared here so placeFavorites sees it (it runs before farmLoop)
 local placeTriedAt = setmetatable({}, { __mode = "k" })
-local placeTripAt = 0
+local noPlotLogAt = 0
 
 local function placeFavorites()
 	if not PlotPlaceRequest then return end
@@ -1048,12 +1049,16 @@ local function placeFavorites()
 		and workspace.Things:FindFirstChild("Plots")
 		and workspace.Things.Plots:FindFirstChild("Slots")
 	local plot = slots and slots:FindFirstChild(LocalPlayer.Name)
-	if not plot then return end -- no claimed plot on this server
+	if not plot then
+		if os.clock() - noPlotLogAt > 60 then
+			noPlotLogAt = os.clock()
+			dlog("place: no plot slot named after you on this server, favorites stay in bag")
+		end
+		return
+	end
 
-	-- Collect candidates BEFORE teleporting: v1 flew home first and usually
-	-- found nothing to place, a pointless trip every farm cycle
+	-- Collect candidates BEFORE teleporting: never fly home with nothing to place
 	local now = os.clock()
-	if now - placeTripAt < 45 then return end
 	local candidates = {}
 	local function collect(container)
 		if not container then return end
@@ -1067,7 +1072,6 @@ local function placeFavorites()
 	collect(LocalPlayer:FindFirstChildOfClass("Backpack"))
 	collect(LocalPlayer.Character)
 	if #candidates == 0 then return end
-	placeTripAt = now
 
 	dlog(string.format("place: %d favorited tool(s) ready, flying to plot", #candidates))
 
@@ -1076,7 +1080,7 @@ local function placeFavorites()
 	startFloat()
 	if not teleportTo(plot) then
 		stopFloat()
-		dlog("place: plot teleport failed, retrying next window")
+		dlog("place: plot teleport failed, favorites stay in bag for now")
 		return
 	end
 
@@ -1085,10 +1089,10 @@ local function placeFavorites()
 		or (plot:FindFirstChildWhichIsA("BasePart", true) or plot).Position
 	local placed, refused = 0, 0
 
-	-- A few per trip, the rest on the next window: the farm should mine, not
-	-- live at home
+	-- Try every candidate in this one visit: refused spots park 60s, so a
+	-- re-run only picks up what still makes sense. Stop-Auto-Farm aborts mid-place
 	for _, tool in ipairs(candidates) do
-		if placed + refused >= 5 then break end
+		if not farming then break end
 		placeTriedAt[tool] = os.clock()
 
 		-- Ground spot on the plot. The plot itself must stay hittable: v1 put
@@ -1306,7 +1310,6 @@ local function farmLoop()
 		-- Re-read the min price every cycle so it can be changed while farming
 		local minPrice = parsePrice(inputBox.Text)
 		autoFavorite()
-		placeFavorites()
 		local best, price, top, topPrice = findBest(minPrice)
 
 		if not best then
@@ -1340,7 +1343,10 @@ local function farmLoop()
 				if sellableWeight() > 0 then
 					sellAll()
 				else
-					setStatus("Bag full of favorites, nothing to sell. Waiting (hop timer running)...", Color3.fromRGB(255, 200, 60))
+					-- Favorites jammed the bag: this is the one in-farm moment
+					-- placement makes sense, it frees the bag so mining resumes
+					setStatus("Bag full of favorites, placing them on the plot...", Color3.fromRGB(255, 200, 60))
+					placeFavorites()
 					task.wait(2)
 				end
 			else
@@ -1402,9 +1408,15 @@ end
 local function startFarm()
 	if farming then return end
 	farming = true
-	startFloat()
 	farmBtn.Text = "■ Stop Auto Farm"
 	farmBtn.BackgroundColor3 = Color3.fromRGB(220, 80, 80)
+	-- Every favorite goes on the plot BEFORE mining starts, so placement and
+	-- mining never fight over the flight state mid-farm
+	setStatus("Placing favorites on plot...", Color3.fromRGB(255, 200, 60))
+	if not LocalPlayer.Character then
+		LocalPlayer.CharacterAdded:Wait()
+	end
+	placeFavorites()
 	task.spawn(farmLoop)
 end
 
