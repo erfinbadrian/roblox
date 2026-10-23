@@ -99,6 +99,16 @@ local function dlog(msg)
 	end
 	-- full log as a real file: open "Documents/Macsploit Workspace/crystal_farm_log.txt"
 	if writefile then pcall(writefile, "crystal_farm_log.txt", table.concat(traceLines, "\n")) end
+	-- placement lines also land in their own file: at the mountain the main
+	-- log churns past its 500-line cap in seconds and erases the history
+	if writefile and msg:sub(1, 11) == "[CF] place:" then
+		local prev = ""
+		if readfile then
+			local ok, raw = pcall(readfile, "place_log.txt")
+			if ok and type(raw) == "string" then prev = raw end
+		end
+		pcall(writefile, "place_log.txt", prev .. msg .. "\n")
+	end
 end
 
 do
@@ -1117,10 +1127,18 @@ local function placeFavorites()
 			Vector3.new(center.X + math.random(-25, 25), center.Y + 80, center.Z + math.random(-25, 25)),
 			Vector3.new(0, -300, 0), rp)
 	end
+	-- A hit counts as plot ground when it belongs to the slot OR is terrain:
+	-- a plot floor can be terrain rather than a part, and IsDescendantOf(plot)
+	-- alone would reject it forever
+	local function onPlot(h)
+		if not h then return false end
+		if h.Instance == workspace.Terrain then return true end
+		return h.Instance:IsDescendantOf(plot)
+	end
 	local floorY = nil
 	for _ = 1, 12 do
 		local h = probe()
-		if h and h.Instance:IsDescendantOf(plot) and (floorY == nil or h.Position.Y < floorY) then
+		if onPlot(h) and (floorY == nil or h.Position.Y < floorY) then
 			floorY = h.Position.Y
 		end
 	end
@@ -1141,7 +1159,7 @@ local function placeFavorites()
 		local hit
 		for _ = 1, 12 do
 			local h = probe()
-			if h and h.Instance:IsDescendantOf(plot) and h.Position.Y <= floorY + 2 then
+			if onPlot(h) and h.Position.Y <= floorY + 2 then
 				hit = h
 				break
 			end
@@ -1447,6 +1465,40 @@ local function farmLoop()
 	setStatus("Auto farm stopped.", Color3.fromRGB(160, 160, 170))
 end
 
+-- Bag+character count of favorited tools
+local function favoritedCount()
+	local n = 0
+	local function count(container)
+		if not container then return end
+		for _, t in ipairs(container:GetChildren()) do
+			if t:IsA("Tool") and t:GetAttribute("Favorited") == true then
+				n += 1
+			end
+		end
+	end
+	count(LocalPlayer:FindFirstChildOfClass("Backpack"))
+	count(LocalPlayer.Character)
+	return n
+end
+
+-- Hard gate: the farm does not mine while favorites wait in the bag. Refused
+-- tools park 60s before a retry, so the loop re-checks every 10s until the bag
+-- is clear, the user stops, or the 3-minute budget runs out (a full-capacity
+-- plot must not brick the farm at home forever)
+local function placeAllFavoritesBeforeFarm()
+	local deadline = os.clock() + 180
+	while farming and os.clock() < deadline do
+		local left = favoritedCount()
+		if left == 0 then return end
+		setStatus("Placing favorites (" .. left .. " left)...", Color3.fromRGB(255, 200, 60))
+		placeFavorites()
+		task.wait(10)
+	end
+	if favoritedCount() > 0 then
+		dlog("place: gate timed out, " .. favoritedCount() .. " favorite(s) still in bag, farming on")
+	end
+end
+
 local function startFarm()
 	if farming then return end
 	farming = true
@@ -1454,11 +1506,10 @@ local function startFarm()
 	farmBtn.BackgroundColor3 = Color3.fromRGB(220, 80, 80)
 	-- Every favorite goes on the plot BEFORE mining starts, so placement and
 	-- mining never fight over the flight state mid-farm
-	setStatus("Placing favorites on plot...", Color3.fromRGB(255, 200, 60))
 	if not LocalPlayer.Character then
 		LocalPlayer.CharacterAdded:Wait()
 	end
-	placeFavorites()
+	placeAllFavoritesBeforeFarm()
 	task.spawn(farmLoop)
 end
 
