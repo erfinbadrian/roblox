@@ -1101,17 +1101,27 @@ local function placeFavorites()
 		local rp = RaycastParams.new()
 		rp.FilterType = Enum.RaycastFilterType.Exclude
 		rp.FilterDescendantsInstances = { LocalPlayer.Character, CrystalsFolder, DroppedCrystalsFolder }
-		local ox, oz = math.random(-18, 18), math.random(-18, 18)
-		local hit = workspace:Raycast(
-			Vector3.new(center.X + ox, center.Y + 50, center.Z + oz),
-			Vector3.new(0, -200, 0), rp)
+		-- The anchor part can be the sign at the plot edge, so a random spot
+		-- around it can land OFF the plot: only accept hits on this plot's own
+		-- geometry, a few spots before giving up on this tool
+		local hit
+		for _ = 1, 8 do
+			local h = workspace:Raycast(
+				Vector3.new(center.X + math.random(-18, 18), center.Y + 50, center.Z + math.random(-18, 18)),
+				Vector3.new(0, -200, 0), rp)
+			if h and h.Instance:IsDescendantOf(plot) then
+				hit = h
+				break
+			end
+		end
 		if not hit then
 			refused += 1
-			dlog(string.format("place: %s raycast missed the floor at +%d,+%d", tool.Name, ox, oz))
+			dlog("place: " .. tool.Name .. " no plot-floor spot found in 8 tries")
 		else
 			if humanoid then
 				pcall(function() humanoid:EquipTool(tool) end)
 			end
+			task.wait(0.3) -- let the equip replicate before the server checks it
 			dlog(string.format("place: %s -> %.1f, %.1f, %.1f",
 				tool.Name, hit.Position.X, hit.Position.Y, hit.Position.Z))
 			pcall(function()
