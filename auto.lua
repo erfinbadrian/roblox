@@ -20,6 +20,7 @@ local SellRequest = Remotes and Remotes:FindFirstChild("SellRequest")
 local GoHome = Remotes and Remotes:FindFirstChild("GoHome")
 local ToggleFavorite = Remotes and Remotes:FindFirstChild("ToggleFavorite")
 local DigRequest = Remotes and Remotes:FindFirstChild("DigRequest")
+local PlotPlaceRequest = Remotes and Remotes:FindFirstChild("PlotPlaceRequest")
 
 -- Server hop: paste the raw URL of this script (e.g. your gist raw link) to auto-resume after hopping
 local SCRIPT_URL = "https://raw.githubusercontent.com/erfinbadrian/roblox/refs/heads/main/auto.lua"
@@ -1033,6 +1034,104 @@ local function autoFavorite()
 	scan(LocalPlayer.Character)
 end
 
+-- Place favorited bag crystals onto the home plot as displays (that is where
+-- their luck bonus works). Spy recipe (remote_spy_out.txt, 2026-10-01):
+-- PlotPlaceRequest(toolName, x, y, z, rotation, tool), tool EQUIPPED, standing
+-- on the plot. Your claimed slot is named after you under Things.Plots.Slots.
+-- Every step dlogs, so a run is readable in crystal_farm_log.txt
+local placeTriedAt = setmetatable({}, { __mode = "k" })
+local placeTripAt = 0
+
+local function placeFavorites()
+	if not PlotPlaceRequest then return end
+	local slots = workspace:FindFirstChild("Things")
+		and workspace.Things:FindFirstChild("Plots")
+		and workspace.Things.Plots:FindFirstChild("Slots")
+	local plot = slots and slots:FindFirstChild(LocalPlayer.Name)
+	if not plot then return end -- no claimed plot on this server
+
+	-- Collect candidates BEFORE teleporting: v1 flew home first and usually
+	-- found nothing to place, a pointless trip every farm cycle
+	local now = os.clock()
+	if now - placeTripAt < 45 then return end
+	local candidates = {}
+	local function collect(container)
+		if not container then return end
+		for _, tool in ipairs(container:GetChildren()) do
+			if tool:IsA("Tool") and tool:GetAttribute("Favorited") == true
+				and now - (placeTriedAt[tool] or 0) > 60 then
+				candidates[#candidates + 1] = tool
+			end
+		end
+	end
+	collect(LocalPlayer:FindFirstChildOfClass("Backpack"))
+	collect(LocalPlayer.Character)
+	if #candidates == 0 then return end
+	placeTripAt = now
+
+	dlog(string.format("place: %d favorited tool(s) ready, flying to plot", #candidates))
+
+	-- The server distance-checks placement like every other remote: stand on
+	-- the plot first, same engines wrap as the mining branch
+	startFloat()
+	if not teleportTo(plot) then
+		stopFloat()
+		dlog("place: plot teleport failed, retrying next window")
+		return
+	end
+
+	local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+	local center = plot:IsA("Model") and plot:GetPivot().Position
+		or (plot:FindFirstChildWhichIsA("BasePart", true) or plot).Position
+	local placed, refused = 0, 0
+
+	-- A few per trip, the rest on the next window: the farm should mine, not
+	-- live at home
+	for _, tool in ipairs(candidates) do
+		if placed + refused >= 5 then break end
+		placeTriedAt[tool] = os.clock()
+
+		-- Ground spot on the plot. The plot itself must stay hittable: v1 put
+		-- the plot in the ray's exclude list, the ray fell through the floor,
+		-- hit was always nil, and not one placement ever fired
+		local rp = RaycastParams.new()
+		rp.FilterType = Enum.RaycastFilterType.Exclude
+		rp.FilterDescendantsInstances = { LocalPlayer.Character, CrystalsFolder, DroppedCrystalsFolder }
+		local ox, oz = math.random(-18, 18), math.random(-18, 18)
+		local hit = workspace:Raycast(
+			Vector3.new(center.X + ox, center.Y + 50, center.Z + oz),
+			Vector3.new(0, -200, 0), rp)
+		if not hit then
+			refused += 1
+			dlog(string.format("place: %s raycast missed the floor at +%d,+%d", tool.Name, ox, oz))
+		else
+			if humanoid then
+				pcall(function() humanoid:EquipTool(tool) end)
+			end
+			dlog(string.format("place: %s -> %.1f, %.1f, %.1f",
+				tool.Name, hit.Position.X, hit.Position.Y, hit.Position.Z))
+			pcall(function()
+				PlotPlaceRequest:FireServer(tool.Name, hit.Position.X, hit.Position.Y, hit.Position.Z, 0, tool)
+			end)
+			-- Success = the server removes the tool (Parent goes nil); a silent
+			-- refusal leaves it right where it was
+			task.wait(0.6)
+			if tool.Parent then
+				refused += 1
+				dlog("place: " .. tool.Name .. " REFUSED (spot blocked or plot capacity full)")
+			else
+				placed += 1
+				dlog("place: " .. tool.Name .. " PLACED")
+			end
+		end
+	end
+	if humanoid then
+		pcall(function() humanoid:UnequipTools() end)
+	end
+	stopFloat()
+	dlog(string.format("place: trip done, %d placed, %d refused", placed, refused))
+end
+
 -- Server hop: join a random open server, queue auto-resume if SCRIPT_URL is set
 local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
@@ -1207,6 +1306,7 @@ local function farmLoop()
 		-- Re-read the min price every cycle so it can be changed while farming
 		local minPrice = parsePrice(inputBox.Text)
 		autoFavorite()
+		placeFavorites()
 		local best, price, top, topPrice = findBest(minPrice)
 
 		if not best then
