@@ -127,7 +127,22 @@ task.spawn(function()
     local t0 = os.clock()
     while os.clock() - t0 < AFK_MIN * 60 and not getgenv().DIG_STOP do
       getgenv().DIG_PING = os.clock()
-      task.wait(10)
+      -- active swing: ~60x the passive zone rate; game enforces its own cooldown server-side
+      local ok = pcall(function() game:GetService("VirtualUser"):Button1Hold() end)
+      if ok then
+        task.wait(0.3)
+        pcall(function() game:GetService("VirtualUser"):Button1Release() end)
+      else
+        local pos = game:GetService("UserInputService"):GetMouseLocation()
+        pcall(function()
+          game:GetService("VirtualInputManager"):SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 0)
+        end)
+        task.wait(0.25)
+        pcall(function()
+          game:GetService("VirtualInputManager"):SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+        end)
+      end
+      task.wait(0.05)
       if not hrp() then task.wait(3) if hrp() then S:FireServer("Home") moveToAfkZone() end end
     end
     if getgenv().DIG_STOP then break end
