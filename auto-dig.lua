@@ -6,11 +6,12 @@
 local RS = game:GetService("ReplicatedStorage")
 local PLR = game:GetService("Players").LocalPlayer
 
-if getgenv().DIG_BOT then
-  print("[digger] already running, refusing duplicate")
+-- duplicate guard: refuse only if another instance pinged recently (dead loops go stale)
+local now = os.clock()
+if getgenv().DIG_PING and now - getgenv().DIG_PING < 30 then
+  print("[digger] already running (ping fresh), refusing duplicate")
   return
 end
-getgenv().DIG_BOT = true
 getgenv().DIG_STOP = false
 
 local function raw(line)
@@ -124,6 +125,7 @@ task.spawn(function()
     slog(string.format("AFK %dmin start power=%s", AFK_MIN, tostring(p0)))
     local t0 = os.clock()
     while os.clock() - t0 < AFK_MIN * 60 and not getgenv().DIG_STOP do
+      getgenv().DIG_PING = os.clock()
       task.wait(10)
       if not hrp() then task.wait(3) if hrp() then S:FireServer("Home") moveToAfkZone() end end
     end
@@ -143,6 +145,7 @@ task.spawn(function()
     end
     local h0, d0, lastHit = hits, os.clock(), os.clock()
     while os.clock() - d0 < DIG_MIN * 60 and not getgenv().DIG_STOP and hrp() do
+      getgenv().DIG_PING = os.clock()
       pcall(swing)
       task.wait(cooldown() + 0.03)
       if hits > lastHit then
