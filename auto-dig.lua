@@ -53,10 +53,30 @@ end)
 
 local function hrp() return PLR.Character and PLR.Character:FindFirstChild("HumanoidRootPart") end
 
+local okEC, Economy = pcall(function()
+  return require(RS:WaitForChild("Shared"):WaitForChild("EconomyConfig"))
+end)
+
 local function cooldown()
   local okc, v = pcall(function() return DigStats.cooldown(PLR) end)
-  if okc and type(v) == "number" and v >= 0.05 then return v end
+  -- ponytail: legal cooldowns dip under 0.05 with fast shovels/potions; only reject NaN/inf/absurd
+  if okc and type(v) == "number" and v == v and v > 0.005 and v < 10 then return v end
   return 0.45
+end
+
+-- expected seconds to break one block at frontier depth with current stats
+local function blockExpected()
+  local ok, t = pcall(function()
+    local depth = -hrp().Position.Y
+    local stages = Economy.Stages
+    local health = stages[#stages].Health
+    for _, s in ipairs(stages) do
+      if depth <= s.Depth then health = s.Health break end
+    end
+    return math.min(health / math.max(DigStats.damage(PLR), 1) * cooldown() * 1.5 + 5, 300)
+  end)
+  if ok and type(t) == "number" and t == t then return t end
+  return 60
 end
 
 local function swingDown()
@@ -152,12 +172,17 @@ task.spawn(function()
     -- dig phase: loot + cash
     S:FireServer("DigSite")
     task.wait(4)
+    local anchor = hrp() and hrp().Position or nil
     if not swing then
-      local a = measure(swingDown, 15)
-      local b = measure(swingStream, 15)
-      swing = (a >= b) and swingDown or swingStream
+      -- alternate short windows so both methods see the same depth range; Stream must strictly win
+      local aTot, bTot = 0, 0
+      for _ = 1, 6 do
+        aTot += measure(swingDown, 5)
+        bTot += measure(swingStream, 5)
+      end
+      swing = (bTot > aTot) and swingStream or swingDown
       slog(string.format("method=%s (Down:%d Stream:%d)",
-        swing == swingDown and "Down" or "Stream", a, b))
+        swing == swingDown and "Down" or "Stream", aTot, bTot))
     end
     local h0, d0, lastHit = hits, os.clock(), os.clock()
     while os.clock() - d0 < DIG_MIN * 60 and not getgenv().DIG_STOP and hrp() do
@@ -166,13 +191,23 @@ task.spawn(function()
       task.wait(cooldown() + 0.03)
       if hits > lastHit then
         lastHit = hits
-      elseif os.clock() - lastHit > 12 then
+      elseif os.clock() - lastHit > blockExpected() then
         lastHit = os.clock()
-        slog(string.format("stall y=%.0f hits=%d, rotating", hrp().Position.Y, hits))
+        local hh = hrp()
+        slog(string.format("stall y=%s hits=%d, rotating",
+          hh and string.format("%.0f", hh.Position.Y) or "?", hits))
         S:FireServer("DigSite")
         task.wait(4)
         local h = hrp()
-        if h then h.CFrame = h.CFrame + Vector3.new(math.random(-36, 36), 0, math.random(-36, 36)) end
+        if h then
+          anchor = h.Position
+          local step = Vector3.new(math.random(-36, 36), 0, math.random(-36, 36))
+          local target = h.Position + step
+          -- clamp total drift to 20 studs from the travel anchor: random walks leave the dig zone
+          local off = target - anchor
+          if off.Magnitude > 20 then target = anchor + off.Unit * 20 end
+          h.CFrame = CFrame.new(target)
+        end
       end
     end
     slog(string.format("dig done blocks=%d power=%s", hits - h0, tostring(PLR:GetAttribute("DigPower"))))
@@ -184,6 +219,7 @@ task.spawn(function()
   local lastP, lastH = PLR:GetAttribute("DigPower") or 0, 0
   while true do
     task.wait(300)
+    if getgenv().DIG_STOP then break end
     local p = PLR:GetAttribute("DigPower") or 0
     slog(string.format("5min power=%s (+%d) blocks=%d (+%d)",
       tostring(p), p - lastP, hits, hits - lastH))
