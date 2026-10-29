@@ -1,150 +1,128 @@
--- auto-dig.lua round 5: clean probe rerun. REJOIN FIRST, dig once with NO scripts to
--- confirm normal digging works, then stand at the digsite and execute this.
--- GUARD: aborts if the phantom 1e9 corruption is still present (means you did not rejoin).
--- WARNING: tier probe may open a Robux window. CLOSE it, never confirm.
--- Output: power_trace5.txt
+-- auto-dig.lua: auto-digger bot. Swings at TRUE legal cooldown via the game's own
+-- DigStats, digs straight down, recovers from boundaries, cycles home for AFK power.
+-- No stat writes, no superhuman rates: indistinguishable from a very dedicated player.
+-- Run: join the game, execute once. Stop: rejoin, or run getgenv().DIG_STOP = true
+-- Log: dig_farm_log.txt
 
 local RS = game:GetService("ReplicatedStorage")
 local PLR = game:GetService("Players").LocalPlayer
-local LOG, LASTDUMP = {}, 0
+local DigStats = require(RS:WaitForChild("Shared"):WaitForChild("DigStats"))
+local M = RS.DiggingRemotes:WaitForChild("Mining")
+local D = RS.DiggingRemotes:WaitForChild("Dig")
+local S = RS.DiggingRemotes:WaitForChild("Surface")
 
-local function log(fmt, ...)
-  local ok, line = pcall(string.format, fmt, ...)
-  line = ok and line or tostring(fmt)
-  LOG[#LOG + 1] = line
-  print("[power] " .. line)
+getgenv().DIG_STOP = false
+
+local function slog(line)
+  pcall(function()
+    local lines = {}
+    local f = readfile("dig_farm_log.txt")
+    if f then for l in string.gmatch(f, "[^\n]+") do lines[#lines + 1] = l end end
+    lines[#lines + 1] = os.date("%m-%d %H:%M:%S ") .. line
+    if #lines > 300 then lines = table.move(lines, #lines - 299, #lines, 1, {}) end
+    writefile("dig_farm_log.txt", table.concat(lines, "\n"))
+  end)
+  print("[digger] " .. line)
 end
 
-local function dump()
-  pcall(function() writefile("power_trace5.txt", table.concat(LOG, "\n")) end)
-end
-
-local function ser(v, d)
-  d = d or 0
-  local t = typeof(v)
-  if t == "Instance" then return v.Name .. ":" .. v.ClassName end
-  if t == "table" and d < 2 then
-    local p = {}
-    for k, val in pairs(v) do p[#p + 1] = tostring(k) .. "=" .. ser(val, d + 1) end
-    return "{" .. table.concat(p, ",") .. "}"
-  end
-  return tostring(v):sub(1, 120)
-end
-
------------------------------------------------------------- guard
-local dp = PLR:GetAttribute("DigPower")
-local sl = PLR:GetAttribute("ShovelLevel")
-if dp == 1000000000 or sl == 1000000000 then
-  log("ABORT: phantom 1e9 values still present (DigPower=%s ShovelLevel=%s). REJOIN the game, dig once without scripts, then run this again.", tostring(dp), tostring(sl))
-  dump()
-  return
-end
-log("guard passed: DigPower=%s tier=%s ShovelLevel=%s", tostring(dp),
-  tostring(PLR:GetAttribute("DigPowerMultiplierTier")), tostring(sl))
-
------------------------------------------------------------- watchers
-PLR.AttributeChanged:Connect(function(k)
-  local lk = string.lower(k)
-  if string.find(lk, "power") or string.find(lk, "shovel")
-    or k == "MobileAssistedDig" or k == "MobileDigConfigReady" then
-    log("attr %s -> %s", k, tostring(PLR:GetAttribute(k)))
-  end
-end)
-local ls = PLR:FindFirstChild("leaderstats")
-if ls then
-  for _, v in ipairs(ls:GetChildren()) do
-    if v:IsA("NumberValue") or v:IsA("IntValue") then
-      v.Changed:Connect(function(n) log("leaderstats.%s -> %s", v.Name, tostring(n)) end)
-    end
-  end
-end
-
-local mineEffects = 0
+-- own block breaks
+local hits = 0
 pcall(function()
-  RS.DiggingRemotes.Effect.OnClientEvent:Connect(function(...)
-    mineEffects += 1
-    local parts = {}
-    for _, a in ipairs({ ... }) do parts[#parts + 1] = ser(a) end
-    if mineEffects <= 10 or mineEffects % 10 == 0 then
-      log("Effect #%d (%s)", mineEffects, table.concat(parts, ", "))
-    end
+  RS.DiggingRemotes.Effect.OnClientEvent:Connect(function(p)
+    if p == PLR then hits += 1 end
   end)
 end)
 
-local old
-old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-  local m = getnamecallmethod()
-  if m == "FireServer" or m == "InvokeServer" then
-    if self.Name == "Mining" or self.Name == "Dig" or self.Name == "MobileDigEnrollment"
-      or self.Name == "UpgradeDigPowerMultiplier" then
-      local parts = {}
-      for _, a in ipairs({ ... }) do parts[#parts + 1] = ser(a) end
-      log("OUT %s %s (%s)", m, self.Name, table.concat(parts, ", "))
-    end
-    local now = tick()
-    if now - LASTDUMP > 2 then dump() LASTDUMP = now end
-  end
-  return old(self, ...)
-end))
-log("spy armed")
-
------------------------------------------------------------- probes
 local function hrp() return PLR.Character and PLR.Character:FindFirstChild("HumanoidRootPart") end
-local function snap(label)
-  log("%s: DigPower=%s effects=%d", label, tostring(PLR:GetAttribute("DigPower")), mineEffects)
+local function cooldown() return math.max(DigStats.cooldown(PLR), 0.05) end
+
+-- method A: assisted Down dig (unlocked via mobile enrollment)
+local function swingDown()
+  local h = hrp() if not h then return end
+  local p = h.Position - Vector3.new(0, 8, 0)
+  D:FireServer(p, Vector3.new(0, 1, 0), Vector3.new(0, -1, 0), "Down")
 end
 
-task.delay(3, function() -- probe 1: mobile enrollment
-  pcall(function()
-    snap("pre-enroll")
-    RS.MobileDigEnrollment:FireServer(true, false, false)
-    log("probe1 fired")
-  end)
-end)
+-- method B: mimic the hold-to-dig Mining stream at the cell below feet
+local function swingStream()
+  local h = hrp() if not h then return end
+  local p = h.Position - Vector3.new(0, 8, 0)
+  M:FireServer("Start", p.X, p.Y, p.Z, 0, -1, 0, "Aim")
+  M:FireServer("Aim", p.X, p.Y, p.Z, 0, -1, 0, "Aim")
+  task.wait(0.1)
+  M:FireServer("Stop")
+end
 
-task.delay(10, function() -- probe 2: tier upgrade (real tier + 1). CLOSE any Robux popup.
-  pcall(function()
-    local cur = PLR:GetAttribute("DigPowerMultiplierTier") or 0
-    snap("pre-tier")
-    log("probe2: tier=%s invoking %s", tostring(cur), tostring(math.floor(cur) + 1))
-    local ok, res = pcall(function() return RS.UpgradeDigPowerMultiplier:InvokeServer(math.floor(cur) + 1) end)
-    log("probe2 result ok=%s type=%s res=%s", tostring(ok), typeof(res), ser(res))
-    task.wait(3)
-    log("probe2 after: tier=%s DigPower=%s",
-      tostring(PLR:GetAttribute("DigPowerMultiplierTier")), tostring(PLR:GetAttribute("DigPower")))
-  end)
-end)
+local function measure(swing, seconds)
+  local before, t0 = hits, os.clock()
+  while os.clock() - t0 < seconds do
+    swing()
+    task.wait(cooldown() + 0.03)
+  end
+  return hits - before
+end
 
-task.delay(22, function() -- probe 3: deep Dig, 25 studs down
-  pcall(function()
-    local h = hrp() if not h then log("probe3: no character") return end
-    local p = h.Position - Vector3.new(0, 25, 0)
-    snap("pre-deepdig")
-    log("probe3: firing Dig at %s", ser(p))
-    RS.DiggingRemotes.Dig:FireServer(p, Vector3.new(0, 1, 0), Vector3.new(0, -1, 0), "Down")
-    task.wait(3)
-    snap("post-deepdig")
-  end)
-end)
-
-task.delay(32, function() -- probe 4: spoofed Mining stream, 10 studs down
-  pcall(function()
-    local h = hrp() if not h then log("probe4: no character") return end
-    local p = h.Position - Vector3.new(0, 10, 0)
-    local M = RS.DiggingRemotes.Mining
-    snap("pre-spoof")
-    log("probe4: 2s spoofed stream at %s", ser(p))
-    M:FireServer("Start", p.X, p.Y, p.Z, 0, -1, 0, "Aim")
-    for _ = 1, 13 do
-      task.wait(0.15)
-      pcall(function() M:FireServer("Aim", p.X, p.Y, p.Z, 0, -1, 0, "Aim") end)
+local cycleCount = 0
+task.spawn(function()
+  task.wait(2)
+  while not getgenv().DIG_STOP do
+    while true do
+      local h, hum = hrp(), PLR.Character and PLR.Character:FindFirstChildOfClass("Humanoid")
+      if h and hum and hum.Health > 0 then break end
+      task.wait(1)
     end
-    M:FireServer("Stop")
-    task.wait(2)
-    snap("post-spoof")
-  end)
+
+    -- pick whichever method actually breaks blocks
+    local a = measure(swingDown, 15)
+    local b = measure(swingStream, 15)
+    local swing = (a >= b) and swingDown or swingStream
+    slog(string.format("method=%s (Down:%d Stream:%d) power=%s",
+      swing == swingDown and "Down" or "Stream", a, b, tostring(PLR:GetAttribute("DigPower"))))
+
+    -- dig until stall
+    local lastHits, stalls = hits, 0
+    while not getgenv().DIG_STOP and hrp() do
+      swing()
+      task.wait(cooldown() + 0.03)
+      if hits > lastHits then
+        lastHits, stalls = hits, 0
+      else
+        stalls += 1
+        if stalls * (cooldown() + 0.03) > 15 then
+          stalls = 0
+          lastHits = hits
+          slog(string.format("stall at y=%.0f hits=%d power=%s, rotating site",
+            hrp() and hrp().Position.Y or 0, hits, tostring(PLR:GetAttribute("DigPower"))))
+          S:FireServer("DigSite")
+          task.wait(4)
+          local h = hrp()
+          if h then h.CFrame = h.CFrame + Vector3.new(math.random(-36, 36), 0, math.random(-36, 36)) end
+          -- every 3rd stall: bank passive power on the home plot for 4 min
+          cycleCount = (cycleCount or 0) + 1
+          if cycleCount % 3 == 0 then
+            slog("AFK cycle: home 4min")
+            S:FireServer("Home")
+            task.wait(240)
+            S:FireServer("DigSite")
+            task.wait(4)
+          end
+        end
+      end
+    end
+    task.wait(2) -- died or respawning; outer loop waits for a live character
+  end
 end)
 
-log("=== READY: stand at the digsite. 4 probes over the next 35s. Close any Robux popup. ===")
-task.delay(50, dump)
-task.delay(100, dump)
+-- 5-minute rate report
+task.spawn(function()
+  local lastP, lastH = PLR:GetAttribute("DigPower") or 0, 0
+  while true do
+    task.wait(300)
+    local p = PLR:GetAttribute("DigPower") or 0
+    slog(string.format("5min power=%s (+%d) blocks=%d (+%d)",
+      tostring(p), p - lastP, hits, hits - lastH))
+    lastP, lastH = p, hits
+  end
+end)
+
+slog("bot loaded, assist=" .. tostring(PLR:GetAttribute("MobileAssistedDig")))
