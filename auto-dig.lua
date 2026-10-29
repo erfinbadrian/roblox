@@ -1,12 +1,11 @@
--- auto-dig.lua: trace + probe "Power" in the digging game.
--- Round 1: find every client-side place Power lives, try inflating it, spy the dig remote.
--- Run: execute once, wait for "WRITE ATTEMPTS" section to finish, then dig ONE time.
--- Output: console + power_trace.txt in the executor workspace. Send that file back.
+-- auto-dig.lua round 2: read the dig code, watch REAL digs, inflate on swing 4+.
+-- KEEP CURRENT SESSION (do not rejoin): the 1e9 phantom values from round 1 are the experiment.
+-- Script arms everything, then YOU go to the digsite and dig 5+ times.
 
+local RS = game:GetService("ReplicatedStorage")
 local PLR = game:GetService("Players").LocalPlayer
-local BIG = 1e9
 local LOG = {}
-local LASTLINE, LASTLINE_T, LASTDUMP = "", 0, 0
+local LASTDUMP = 0
 
 local function log(fmt, ...)
   local ok, line = pcall(string.format, fmt, ...)
@@ -16,7 +15,7 @@ local function log(fmt, ...)
 end
 
 local function dump()
-  pcall(function() writefile("power_trace.txt", table.concat(LOG, "\n")) end)
+  pcall(function() writefile("power_trace2.txt", table.concat(LOG, "\n")) end)
 end
 
 local function ispow(s)
@@ -24,86 +23,48 @@ local function ispow(s)
   return s:find("power") or s:find("strength") or s:find("shovel") or s:find("dig")
 end
 
-local VALH, ATTRH, TBLC, UPVL = {}, {}, {}, {} -- write targets
+------------------------------------------------------------ 1. decompile the dig path
+local scripts = {
+  { "MiningSwing", "PlayerScripts.Client.Digging.MiningSwing" },
+  { "HoldToDig", "PlayerScripts.Client.Digging.HoldToDig" },
+  { "DigPowerMultiplier", "PlayerScripts.Client.DigPowerMultiplier" },
+  { "MobileDigEligibility", "PlayerScripts.Client.Digging.MobileDigEligibility" },
+  { "Shared_DigMath", "ReplicatedStorage.Shared.DigMath" },
+  { "Shared_ShovelPowerCompensation", "ReplicatedStorage.Shared.ShovelPowerCompensation" },
+}
+for _, t in ipairs(scripts) do
+  pcall(function()
+    local obj = game
+    for seg in string.gmatch(t[2], "[^.]+") do obj = obj[seg] end
+    local ok, src = pcall(function() return decompile(obj) end)
+    if ok and type(src) == "string" and #src > 0 then
+      pcall(function() writefile("dec_" .. t[1] .. ".lua", src) end)
+      log("decompiled %s (%d chars)", t[1], #src)
+    else
+      log("decompile FAILED %s: %s", t[1], tostring(src))
+    end
+  end)
+end
+dump()
 
------------------------------------------------------------- 1. snapshot
-pcall(function()
-  log("game: %s (place %s)", game.MarketplaceService:GetProductInfo(game.PlaceId).Name, tostring(game.PlaceId))
+------------------------------------------------------------ 2. watchers
+PLR.AttributeChanged:Connect(function(k)
+  if ispow(k) or k == "AdminShovelOwned" then log("attr %s -> %s", k, tostring(PLR:GetAttribute(k))) end
 end)
-log("player %s", tostring(PLR.Name))
-
 local ls = PLR:FindFirstChild("leaderstats")
 if ls then
   for _, v in ipairs(ls:GetChildren()) do
-    local num = v:IsA("NumberValue") or v:IsA("IntValue")
-    log("leaderstats %s %s = %s", v.ClassName, v.Name, num and tostring(v.Value) or "-")
-    if num then
+    if v:IsA("NumberValue") or v:IsA("IntValue") then
       v.Changed:Connect(function(n) log("leaderstats.%s -> %s", v.Name, tostring(n)) end)
-      if ispow(v.Name) then VALH[#VALH + 1] = v end
     end
   end
 end
 
-local function attrs(o, label)
-  if not o then return end
-  for k, val in pairs(o:GetAttributes()) do
-    if ispow(k) then
-      log("%s attr %s = %s (%s)", label, k, tostring(val), typeof(val))
-      if typeof(val) == "number" then ATTRH[#ATTRH + 1] = { o = o, k = k, was = val } end
-    end
-  end
-end
-attrs(PLR, "player")
-attrs(PLR.Character, "character")
-attrs(PLR.Character and PLR.Character:FindFirstChildOfClass("Tool"), "tool")
-PLR.AttributeChanged:Connect(function(k)
-  if ispow(k) then log("player attr %s -> %s", k, tostring(PLR:GetAttribute(k))) end
-end)
+------------------------------------------------------------ 3. remote spy: log everything, inflate Dig args after 3 clean swings
+local DIG = RS:FindFirstChild("DiggingRemotes") and RS.DiggingRemotes:FindFirstChild("Dig")
+if not DIG then log("WARN: Dig remote not found") end
+local digCount, X = 0, 1000
 
------------------------------------------------------------- 2. instance name scan
-pcall(function()
-  for _, d in ipairs(game:GetDescendants()) do
-    if ispow(d.Name) then
-      local num = d:IsA("NumberValue") or d:IsA("IntValue")
-      log("instance %s %s%s", d.ClassName, d:GetFullName(), num and (" = " .. tostring(d.Value)) or "")
-      if num then VALH[#VALH + 1] = d end
-    end
-  end
-end)
-
------------------------------------------------------------- 3. gc scan (functions + tables)
-log("gc scan start, may take a few seconds")
-pcall(function()
-  for _, o in ipairs(getgc(true)) do
-    local t = type(o)
-    if t == "function" then
-      local ok, info = pcall(debug.getinfo, o)
-      if ok and info and info.what == "Lua" then
-        for i = 1, 30 do
-          local ok2, n, val = pcall(debug.getupvalue, o, i)
-          if not ok2 or n == nil then break end
-          if ispow(n) then
-            log("upvalue %s = %s @ %s:%s", tostring(n), tostring(val), tostring(info.short_src), tostring(info.linedefined))
-            if type(val) == "number" then UPVL[#UPVL + 1] = { f = o, i = i, n = tostring(n) } end
-          end
-        end
-      end
-    elseif t == "table" then
-      pcall(function()
-        for k, val in pairs(o) do
-          if type(k) == "string" and ispow(k) then
-            log("gc table [%s] = %s", k, tostring(val))
-            if type(val) == "number" then TBLC[#TBLC + 1] = { t = o, k = k } end
-          end
-        end
-      end)
-    end
-  end
-end)
-log("gc scan done: %d values, %d attrs, %d tables, %d upvalues", #VALH, #ATTRH, #TBLC, #UPVL)
-dump()
-
------------------------------------------------------------- 4. remote spy
 local function ser(v, d)
   d = d or 0
   local t = typeof(v)
@@ -116,66 +77,54 @@ local function ser(v, d)
   return tostring(v):sub(1, 120)
 end
 
-local spyOk, spyErr = pcall(function()
-  local old
-  old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-    local m = getnamecallmethod()
-    if m == "FireServer" or m == "InvokeServer" then
-      local parts = {}
-      for _, a in ipairs({ ... }) do parts[#parts + 1] = ser(a) end
-      local line = ("%s %s (%s)"):format(m, self:GetFullName(), table.concat(parts, ", "))
-      local now = tick()
-      if line ~= LASTLINE or now - LASTLINE_T > 0.5 then
-        log("remote %s", line)
-        LASTLINE, LASTLINE_T = line, now
+local old
+old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+  local m = getnamecallmethod()
+  if m == "FireServer" or m == "InvokeServer" then
+    local args = { ... }
+    local parts = {}
+    for _, a in ipairs(args) do parts[#parts + 1] = ser(a) end
+    log("remote %s %s (%s)", m, self:GetFullName(), table.concat(parts, ", "))
+    if self == DIG and m == "FireServer" then
+      digCount += 1
+      if digCount > 3 then
+        local mut, p = {}, {}
+        for i, a in ipairs(args) do
+          -- ponytail: coords are small ints, power values run 500+, may inflate a coord and fail a dig, the log shows it
+          mut[i] = (type(a) == "number" and a >= 500 and a < 1e12) and a * X or a
+          p[#p + 1] = ser(mut[i])
+        end
+        log("INFLATED dig #%d x%d -> (%s)", digCount, X, table.concat(p, ", "))
+        local now = tick()
+        if now - LASTDUMP > 2 then dump() LASTDUMP = now end
+        return old(self, table.unpack(mut))
       end
-      if now - LASTDUMP > 2 then dump() LASTDUMP = now end
     end
-    return old(self, ...)
-  end))
+    local now = tick()
+    if now - LASTDUMP > 2 then dump() LASTDUMP = now end
+  end
+  return old(self, ...)
+end))
+log("spy armed. Dig remote = %s", DIG and DIG:GetFullName() or "nil")
+
+------------------------------------------------------------ 4. admin shovel probe
+task.delay(3, function()
+  pcall(function()
+    local prompt
+    for _, d in ipairs(workspace:GetDescendants()) do
+      if d:IsA("ProximityPrompt") and string.find(d.Name, "AdminShovel") then prompt = d break end
+    end
+    if prompt then
+      log("firing %s", prompt:GetFullName())
+      fireproximityprompt(prompt)
+      task.wait(2)
+      log("AdminShovelOwned after fire = %s", tostring(PLR:GetAttribute("AdminShovelOwned")))
+    else
+      log("no AdminShovel prompt found")
+    end
+  end)
 end)
-log(spyOk and "remote spy installed" or ("remote spy FAILED: " .. tostring(spyErr)))
 
------------------------------------------------------------- 5. write attempts (batch, then read back)
-log("=== WRITE ATTEMPTS target %g ===", BIG)
-local applied = {}
-for _, v in ipairs(VALH) do
-  pcall(function()
-    local b = v.Value
-    v.Value = BIG
-    applied[#applied + 1] = { "value " .. v:GetFullName(), tostring(b), function() return tostring(v.Value) end }
-  end)
-end
-for _, h in ipairs(ATTRH) do
-  pcall(function()
-    h.o:SetAttribute(h.k, BIG)
-    applied[#applied + 1] = { "attr " .. h.k, tostring(h.was), function() return tostring(h.o:GetAttribute(h.k)) end }
-  end)
-end
-for _, h in ipairs(TBLC) do
-  pcall(function()
-    local b = h.t[h.k]
-    h.t[h.k] = BIG
-    applied[#applied + 1] = { "table[" .. h.k .. "]", tostring(b), function() return tostring(h.t[h.k]) end }
-  end)
-end
-for _, h in ipairs(UPVL) do
-  pcall(function()
-    local _, b = debug.getupvalue(h.f, h.i)
-    debug.setupvalue(h.f, h.i, BIG)
-    applied[#applied + 1] = { "upvalue[" .. h.n .. "]", tostring(b), function()
-      local _, n2 = debug.getupvalue(h.f, h.i)
-      return tostring(n2)
-    end }
-  end)
-end
-
-task.wait(1.5)
-for _, a in ipairs(applied) do
-  pcall(function() log("%s: %s -> %g -> now %s", a[1], a[2], BIG, a[3]()) end)
-end
-dump()
-
-log("=== done. DIG ONE TIME NOW, then send power_trace.txt ===")
-task.delay(45, dump)
-task.delay(120, dump)
+log("=== READY: go to the DIGSITE and dig 5+ times NOW (not the AFK plot) ===")
+task.delay(60, dump)
+task.delay(180, dump)
