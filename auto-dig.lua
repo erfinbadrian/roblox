@@ -1,6 +1,7 @@
--- auto-dig.lua round 2: read the dig code, watch REAL digs, inflate on swing 4+.
--- KEEP CURRENT SESSION (do not rejoin): the 1e9 phantom values from round 1 are the experiment.
--- Script arms everything, then YOU go to the digsite and dig 5+ times.
+-- auto-dig.lua round 3: PURE INTEL. Zero writes, zero fires. Do NOT run rounds 1-2 again.
+-- Steps: REJOIN the game first (clears the corrupted 1e9 state that broke digging),
+-- execute THIS file, then dig 5+ times at the digsite.
+-- Output: power_trace3.txt + dec_<name>.lua files in the executor workspace.
 
 local RS = game:GetService("ReplicatedStorage")
 local PLR = game:GetService("Players").LocalPlayer
@@ -15,7 +16,7 @@ local function log(fmt, ...)
 end
 
 local function dump()
-  pcall(function() writefile("power_trace2.txt", table.concat(LOG, "\n")) end)
+  pcall(function() writefile("power_trace3.txt", table.concat(LOG, "\n")) end)
 end
 
 local function ispow(s)
@@ -23,19 +24,27 @@ local function ispow(s)
   return s:find("power") or s:find("strength") or s:find("shovel") or s:find("dig")
 end
 
------------------------------------------------------------- 1. decompile the dig path
-local scripts = {
-  { "MiningSwing", "PlayerScripts.Client.Digging.MiningSwing" },
-  { "HoldToDig", "PlayerScripts.Client.Digging.HoldToDig" },
-  { "DigPowerMultiplier", "PlayerScripts.Client.DigPowerMultiplier" },
-  { "MobileDigEligibility", "PlayerScripts.Client.Digging.MobileDigEligibility" },
-  { "Shared_DigMath", "ReplicatedStorage.Shared.DigMath" },
-  { "Shared_ShovelPowerCompensation", "ReplicatedStorage.Shared.ShovelPowerCompensation" },
+------------------------------------------------------------ 1. decompile sweep
+local roots = { PLR = PLR, RS = RS, WS = workspace }
+local targets = {
+  { "MiningSwing", "PLR.PlayerScripts.Client.Digging.MiningSwing" },
+  { "HoldToDig", "PLR.PlayerScripts.Client.Digging.HoldToDig" },
+  { "DiggingRoot", "PLR.PlayerScripts.Client.Digging" },
+  { "DigPowerMultiplier", "PLR.PlayerScripts.Client.DigPowerMultiplier" },
+  { "Progression", "PLR.PlayerScripts.Client.Progression" },
+  { "MobileDigEligibility", "PLR.PlayerScripts.Client.Digging.MobileDigEligibility" },
+  { "Shared_DigMath", "RS.Shared.DigMath" },
+  { "Shared_DigStats", "RS.Shared.DigStats" },
+  { "Shared_MobileDigConfig", "RS.Shared.MobileDigConfig" },
+  { "Shared_ShovelPowerCompensation", "RS.Shared.ShovelPowerCompensation" },
+  { "Cmdr_setdigpower", "RS.CmdrClient.Commands.setdigpower" },
 }
-for _, t in ipairs(scripts) do
+for _, t in ipairs(targets) do
   pcall(function()
-    local obj = game
-    for seg in string.gmatch(t[2], "[^.]+") do obj = obj[seg] end
+    local rootName, rest = string.match(t[2], "^(%w+)%.(.+)$")
+    local obj = roots[rootName]
+    for seg in string.gmatch(rest, "[^.]+") do obj = obj and obj[seg] end
+    if not obj then log("NOT FOUND %s", t[2]) return end
     local ok, src = pcall(function() return decompile(obj) end)
     if ok and type(src) == "string" and #src > 0 then
       pcall(function() writefile("dec_" .. t[1] .. ".lua", src) end)
@@ -49,7 +58,9 @@ dump()
 
 ------------------------------------------------------------ 2. watchers
 PLR.AttributeChanged:Connect(function(k)
-  if ispow(k) or k == "AdminShovelOwned" then log("attr %s -> %s", k, tostring(PLR:GetAttribute(k))) end
+  if ispow(k) or k == "AdminShovelOwned" or k == "VerifiedDigPower" then
+    log("attr %s -> %s", k, tostring(PLR:GetAttribute(k)))
+  end
 end)
 local ls = PLR:FindFirstChild("leaderstats")
 if ls then
@@ -60,11 +71,7 @@ if ls then
   end
 end
 
------------------------------------------------------------- 3. remote spy: log everything, inflate Dig args after 3 clean swings
-local DIG = RS:FindFirstChild("DiggingRemotes") and RS.DiggingRemotes:FindFirstChild("Dig")
-if not DIG then log("WARN: Dig remote not found") end
-local digCount, X = 0, 1000
-
+------------------------------------------------------------ 3. remote spy, log only
 local function ser(v, d)
   d = d or 0
   local t = typeof(v)
@@ -77,6 +84,7 @@ local function ser(v, d)
   return tostring(v):sub(1, 120)
 end
 
+local mining = { Start = 0, Aim = 0, Stop = 0, other = 0 }
 local old
 old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
   local m = getnamecallmethod()
@@ -85,46 +93,16 @@ old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
     local parts = {}
     for _, a in ipairs(args) do parts[#parts + 1] = ser(a) end
     log("remote %s %s (%s)", m, self:GetFullName(), table.concat(parts, ", "))
-    if self == DIG and m == "FireServer" then
-      digCount += 1
-      if digCount > 3 then
-        local mut, p = {}, {}
-        for i, a in ipairs(args) do
-          -- ponytail: coords are small ints, power values run 500+, may inflate a coord and fail a dig, the log shows it
-          mut[i] = (type(a) == "number" and a >= 500 and a < 1e12) and a * X or a
-          p[#p + 1] = ser(mut[i])
-        end
-        log("INFLATED dig #%d x%d -> (%s)", digCount, X, table.concat(p, ", "))
-        local now = tick()
-        if now - LASTDUMP > 2 then dump() LASTDUMP = now end
-        return old(self, table.unpack(mut))
-      end
+    if self.Parent == RS:FindFirstChild("DiggingRemotes") and type(args[1]) == "string" then
+      mining[args[1]] = (mining[args[1]] or 0) + 1
     end
     local now = tick()
     if now - LASTDUMP > 2 then dump() LASTDUMP = now end
   end
   return old(self, ...)
 end))
-log("spy armed. Dig remote = %s", DIG and DIG:GetFullName() or "nil")
+log("spy armed (log only, no mutation)")
 
------------------------------------------------------------- 4. admin shovel probe
-task.delay(3, function()
-  pcall(function()
-    local prompt
-    for _, d in ipairs(workspace:GetDescendants()) do
-      if d:IsA("ProximityPrompt") and string.find(d.Name, "AdminShovel") then prompt = d break end
-    end
-    if prompt then
-      log("firing %s", prompt:GetFullName())
-      fireproximityprompt(prompt)
-      task.wait(2)
-      log("AdminShovelOwned after fire = %s", tostring(PLR:GetAttribute("AdminShovelOwned")))
-    else
-      log("no AdminShovel prompt found")
-    end
-  end)
-end)
-
-log("=== READY: go to the DIGSITE and dig 5+ times NOW (not the AFK plot) ===")
-task.delay(60, dump)
+log("=== READY: dig 5+ times at the digsite NOW ===")
+task.delay(60, function() log("mining counts: Start=%d Aim=%d Stop=%d other=%d", mining.Start, mining.Aim, mining.Stop, mining.other) dump() end)
 task.delay(180, dump)
