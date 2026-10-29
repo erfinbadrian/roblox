@@ -12,6 +12,7 @@ if getgenv().DIG_PING and now - getgenv().DIG_PING < 30 then
   print("[digger] already running (ping fresh), refusing duplicate")
   return
 end
+getgenv().DIG_PING = now -- stamp immediately: closes the rapid-execute window
 getgenv().DIG_STOP = false
 
 local function raw(line)
