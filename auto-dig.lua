@@ -1,17 +1,29 @@
--- auto-dig.lua: auto-digger bot. Swings at TRUE legal cooldown via the game's own
--- DigStats, digs straight down, recovers from boundaries, cycles home for AFK power.
--- No stat writes, no superhuman rates: indistinguishable from a very dedicated player.
+-- auto-dig.lua: auto-digger bot. Swings at TRUE legal cooldown (DigStats if requirable,
+-- else a conservative 0.45s), digs straight down, recovers from boundaries, AFK cycles.
 -- Run: join the game, execute once. Stop: rejoin, or run getgenv().DIG_STOP = true
--- Log: dig_farm_log.txt
+-- Log: dig_farm_log.txt (boots, method choice, stalls, 5min rates)
 
 local RS = game:GetService("ReplicatedStorage")
 local PLR = game:GetService("Players").LocalPlayer
-local DigStats = require(RS:WaitForChild("Shared"):WaitForChild("DigStats"))
-local M = RS.DiggingRemotes:WaitForChild("Mining")
-local D = RS.DiggingRemotes:WaitForChild("Dig")
-local S = RS.DiggingRemotes:WaitForChild("Surface")
 
 getgenv().DIG_STOP = false
+
+local function raw(line)
+  pcall(function() writefile("dig_farm_log.txt", line) end)
+  print("[digger] " .. line)
+end
+raw("boot " .. os.date("%m-%d %H:%M:%S") .. " assist=" .. tostring(PLR:GetAttribute("MobileAssistedDig")))
+
+local okDS, DigStats = pcall(function()
+  return require(RS:WaitForChild("Shared"):WaitForChild("DigStats"))
+end)
+raw("DigStats require " .. (okDS and "ok" or "FAILED, using 0.45 fallback"))
+
+local okR, M, D, S = pcall(function()
+  local R = RS:WaitForChild("DiggingRemotes")
+  return R:WaitForChild("Mining"), R:WaitForChild("Dig"), R:WaitForChild("Surface")
+end)
+if not okR then raw("REMOTES FAILED: " .. tostring(M)) return end
 
 local function slog(line)
   pcall(function()
@@ -25,7 +37,6 @@ local function slog(line)
   print("[digger] " .. line)
 end
 
--- own block breaks
 local hits = 0
 pcall(function()
   RS.DiggingRemotes.Effect.OnClientEvent:Connect(function(p)
@@ -34,16 +45,20 @@ pcall(function()
 end)
 
 local function hrp() return PLR.Character and PLR.Character:FindFirstChild("HumanoidRootPart") end
-local function cooldown() return math.max(DigStats.cooldown(PLR), 0.05) end
 
--- method A: assisted Down dig (unlocked via mobile enrollment)
+-- ponytail: pcall per call; if the module dies in this executor, 0.45 is EconomyConfig's base cooldown
+local function cooldown()
+  local okc, v = pcall(function() return DigStats.cooldown(PLR) end)
+  if okc and type(v) == "number" and v >= 0.05 then return v end
+  return 0.45
+end
+
 local function swingDown()
   local h = hrp() if not h then return end
   local p = h.Position - Vector3.new(0, 8, 0)
   D:FireServer(p, Vector3.new(0, 1, 0), Vector3.new(0, -1, 0), "Down")
 end
 
--- method B: mimic the hold-to-dig Mining stream at the cell below feet
 local function swingStream()
   local h = hrp() if not h then return end
   local p = h.Position - Vector3.new(0, 8, 0)
@@ -56,7 +71,7 @@ end
 local function measure(swing, seconds)
   local before, t0 = hits, os.clock()
   while os.clock() - t0 < seconds do
-    swing()
+    pcall(swing)
     task.wait(cooldown() + 0.03)
   end
   return hits - before
@@ -72,17 +87,15 @@ task.spawn(function()
       task.wait(1)
     end
 
-    -- pick whichever method actually breaks blocks
     local a = measure(swingDown, 15)
     local b = measure(swingStream, 15)
     local swing = (a >= b) and swingDown or swingStream
     slog(string.format("method=%s (Down:%d Stream:%d) power=%s",
       swing == swingDown and "Down" or "Stream", a, b, tostring(PLR:GetAttribute("DigPower"))))
 
-    -- dig until stall
     local lastHits, stalls = hits, 0
     while not getgenv().DIG_STOP and hrp() do
-      swing()
+      pcall(swing)
       task.wait(cooldown() + 0.03)
       if hits > lastHits then
         lastHits, stalls = hits, 0
@@ -97,8 +110,7 @@ task.spawn(function()
           task.wait(4)
           local h = hrp()
           if h then h.CFrame = h.CFrame + Vector3.new(math.random(-36, 36), 0, math.random(-36, 36)) end
-          -- every 3rd stall: bank passive power on the home plot for 4 min
-          cycleCount = (cycleCount or 0) + 1
+          cycleCount += 1
           if cycleCount % 3 == 0 then
             slog("AFK cycle: home 4min")
             S:FireServer("Home")
@@ -109,11 +121,10 @@ task.spawn(function()
         end
       end
     end
-    task.wait(2) -- died or respawning; outer loop waits for a live character
+    task.wait(2)
   end
 end)
 
--- 5-minute rate report
 task.spawn(function()
   local lastP, lastH = PLR:GetAttribute("DigPower") or 0, 0
   while true do
@@ -125,4 +136,4 @@ task.spawn(function()
   end
 end)
 
-slog("bot loaded, assist=" .. tostring(PLR:GetAttribute("MobileAssistedDig")))
+slog("bot loaded")
